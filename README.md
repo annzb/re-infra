@@ -27,7 +27,7 @@ Configure these under **Settings â†’ Secrets and variables â†’ Actions
 | Variable | Example/source | Used for |
 |---|---|---|
 | `AWS_REGION` | `us-east-1`; must match `envs.yaml` | Region used by the workflows that contact AWS. |
-| `AWS_ROLE_GITHUB` | `GitHubRoleArn` output of `rc-bootstrap` | The only GitHub OIDC role. Assumed for main-branch infrastructure applies and ECR publishing; its trust policy accepts `main` only. |
+| `AWS_ROLE_GITHUB` | `GitHubRoleArn` output of `rc-bootstrap` | The only GitHub OIDC role. Every branch assumes it to publish its image; `main` additionally uses it for infrastructure applies. |
 | `AWS_ROLE_CFN` | `CloudFormationExecutionRoleArn` output of `rc-bootstrap` | Role passed to CloudFormation while it evaluates or executes change sets. |
 
 The workflows expose `AWS_ROLE_CFN` to the Python CLI as `RC_INFRA_CFN_ROLE_ARN`. Do not create a separate repository variable named `RC_INFRA_CFN_ROLE_ARN`.
@@ -49,9 +49,9 @@ A push is the only trigger, and exactly one entry point runs: [`main.yml`](.gith
 ### Every branch except main — `non-main.yml`
 
 1. **Validate** ([`validate.yml`](.github/workflows/validate.yml)) installs the root project, runs Ruff, mypy, and pytest, runs `cfn-lint` on `infra/*.yaml`, and runs `rc-infra validate` on `envs.yaml`.
-2. **Build** ([`build.yml`](.github/workflows/build.yml)) starts after validation. It builds the image, runs the `rc_lambda_base` suites against LocalStack, and smoke-tests the built image. It is called with `publish: false`, so nothing reaches ECR.
+2. **Build** ([`build.yml`](.github/workflows/build.yml)) starts after validation. In a single job it runs the `rc_lambda_base` suites against LocalStack, builds the image, smoke-tests it, and pushes it to `rc-lambda-base:<branch>`. It does not move `latest` and does not touch the SSM digest.
 
-Branch runs never contact AWS, and a branch deletion is skipped rather than rebuilt. To see what a change would do to live infrastructure, run a local dry run (section 3).
+A branch run reaches AWS only to push its own image tag; it never deploys infrastructure, and a branch deletion is skipped rather than rebuilt. To see what a change would do to live infrastructure, run a local dry run (section 3).
 
 ### Pushes to main — `main.yml`
 
@@ -60,8 +60,8 @@ Branch runs never contact AWS, and a branch deletion is skipped rather than rebu
    - It assumes `AWS_ROLE_GITHUB` through GitHub OIDC and passes `AWS_ROLE_CFN` to CloudFormation.
    - It repeats the inexpensive template and config validation, then runs `rc-infra apply --yes`, which prints the plan, refuses it if anything is `BLOCKED`, and otherwise creates, imports, updates, or removes infrastructure until AWS matches `envs.yaml`.
 3. **Build** starts only after the environment deployment finishes successfully.
-   - The same build and test jobs run.
-   - It is called with `publish: true`, so the tested image is pushed to `rc-lambda-base:latest` and its digest is written to `/rc/lambda-base/image-uri`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
+   - The same single job runs.
+   - Because the branch is `main`, it pushes both `rc-lambda-base:main` and `rc-lambda-base:latest`, then writes the new digest to `/rc/lambda-base/image-uri`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
 
 The build workflow passes the exact built image between jobs as a workflow artifact, so its publish job cannot substitute an untested rebuild.
 
@@ -73,7 +73,7 @@ The build workflow passes the exact built image between jobs as a workflow artif
 | `non-main.yml` | push to any other branch | Entry point; validation and image build/test only | None. |
 | `validate.yml` | `workflow_call` | Lint, type-check, test, `cfn-lint`, `rc-infra validate` | None. |
 | `deploy-envs.yml` | `workflow_call` | Reconciles `rc-platform` and `rc-env-*`; tears down environments removed from `envs.yaml` | Main only, using the GitHub role and the CloudFormation execution role. |
-| `build.yml` | `workflow_call` | Builds and tests the Lambda base image; publishes it on main | Build and test need no credentials; publish uses the GitHub role. |
+| `build.yml` | `workflow_call` | Builds, tests and publishes the Lambda base image in one job | Every branch pushes its own tag using the GitHub role; `main` also moves `latest` and writes the SSM digest. |
 
 A called workflow must never declare the same concurrency group as its caller: GitHub reports that as a deadlock and cancels the run. The entry points own `re-infra-<ref>`, `deploy-envs.yml` serializes on `re-infra-deploy`, and `validate.yml` declares none.
 
@@ -246,11 +246,11 @@ uv remove <package>
 1. Edit `images/lambda-base/src/rc_lambda_base/`.
 2. Update unit or integration tests under `images/lambda-base/tests/`.
 3. Run the checks from the next section.
-4. Push the branch. Every branch builds and tests the image; an eligible successful main run publishes it.
+4. Push the branch. It is built, tested and published as `rc-lambda-base:<branch>`, so it can be pulled and tried before merging. Merging to `main` moves `main` and `latest` and republishes the digest.
 
-Every main push republishes the tested image to the single `rc-lambda-base:latest` tag, overwriting what was there, and writes the new immutable repository digest to `/rc/lambda-base/image-uri`. There are no per-build tags. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
+Every push republishes the tested image under a tag named after its branch, overwriting what that tag pointed at. A push to `main` additionally moves `latest` and writes the new immutable repository digest to `/rc/lambda-base/image-uri`. There are no per-build tags; each image carries `org.opencontainers.image.revision` with the commit it was built from. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
 
-Because only `latest` is pushed, the image it previously pointed at becomes untagged, and `rc-platform`'s lifecycle rule expires untagged images after **30 days**. That window is also the rollback window: refresh any digest pinned in `retribalize-core` within it, or the pin stops resolving.
+Because tags move, the image a tag previously pointed at becomes untagged, and `rc-platform`'s lifecycle rule expires untagged images after **30 days**. That window is also the rollback window: refresh any digest pinned in `retribalize-core` within it, or the pin stops resolving.
 
 ## 6. Local setup and development
 
@@ -325,9 +325,10 @@ docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-report \
 | Build and smoke-test the base image | Yes | Every push |
 | Run LocalStack integration tests | Yes | Every push |
 | Compare desired infrastructure with AWS | Yes, with suitable local AWS credentials | Main only, inside the deploy stage |
-| Assume the GitHub OIDC role | No; its trust policy accepts only GitHub Actions tokens from `main` | Yes |
+| Assume the GitHub OIDC role | No; its trust policy accepts only GitHub Actions tokens from this repository | Yes |
 | Apply environment infrastructure | Technically possible with separately authorized local credentials, but not the normal path | Main only |
-| Publish the tested base-image artifact, scan it, update `latest`, and publish its digest | Not reproduced by the documented local commands | Main only, when image inputs changed |
+| Publish the tested image under its branch tag | Not reproduced by the documented local commands | Every push |
+| Move `latest` and publish the digest to SSM | Not reproduced by the documented local commands | Main only |
 
 ## 7. Integration contract with `retribalize-core`
 
@@ -368,5 +369,5 @@ docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-report \
 - **Inspect an environment stack:** `aws cloudformation describe-stacks --stack-name rc-env-<name>`.
 - **Inspect published config:** `aws ssm get-parameters-by-path --path /rc/env/<name>/ --recursive`.
 - **Resolve `BLOCKED`:** read the action details. Busy/broken CloudFormation stacks must stabilize or be repaired; import candidates require the template to match live bucket settings.
-- **Roll back the base image:** pin a prior immutable ECR digest in `retribalize-core`. List what is still available with `aws ecr describe-images --repository-name rc-lambda-base`; superseded images are untagged and expire 30 days after they stop being `latest`.
+- **Roll back the base image:** pin a prior immutable ECR digest in `retribalize-core`. List what is still available with `aws ecr describe-images --repository-name rc-lambda-base`; tags name the branch they came from, and superseded images are untagged and expire 30 days later.
 - **Avoid console drift:** do not repair stack-owned resources manually in the AWS console. Change `infra/*.yaml` or `envs.yaml` and apply through the workflow.

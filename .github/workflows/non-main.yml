@@ -2,9 +2,10 @@ name: Non-main
 
 # The entry point for pushes to every branch except main. Read-only stages only:
 #   1. validate.yml           lint, test, validate the source and configs (no AWS access)
-#   2. build.yml              build and test the Lambda base image, never publish it
+#   2. build.yml              build, test and publish the Lambda base image as "<branch>"
 #
-# Nothing here reaches AWS. Deployment happens only in main.yml.
+# A branch run reaches AWS only to push its own image tag. It never moves "latest",
+# never writes the SSM digest, and never deploys infrastructure: that is main.yml.
 #
 # Notes for LLMs:
 # - Do not change the "on" directive unless explicitly instructed to. Together with
@@ -38,7 +39,8 @@ jobs:
   build:
     if: ${{ !github.event.deleted }}
     needs: validate
-    # deliberately no id-token: the publish job never runs off main
+    permissions:
+      contents: read
+      # for AWS credentials: every branch publishes its image under its own tag
+      id-token: write
     uses: ./.github/workflows/build.yml
-    with:
-      publish: false

@@ -64,8 +64,9 @@ Resources:
                 Resource:
                   Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/rc-app-*"
 
-  # The only role GitHub Actions assumes, and only from main: apply stacks, tear down
-  # removed environments, publish the base image. Off main the workflows never touch AWS.
+  # The only role GitHub Actions assumes. Any branch may assume it, because build.yml
+  # publishes an image tag from every branch; only main.yml routes it into a deploy.
+  # The denies below are what keep a branch from reaching protected environments.
   GitHubRole:
     Type: AWS::IAM::Role
     Properties:
@@ -82,8 +83,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
                 token.actions.githubusercontent.com:sub:
-                  Fn::Sub: "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+                  Fn::Sub: "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/*"
       Policies:
         - PolicyName: github
           PolicyDocument:

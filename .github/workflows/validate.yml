@@ -19,7 +19,7 @@ jobs:
   validate:
     name: Lint, test, validate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       # fetch current repo
       - uses: actions/checkout@v7

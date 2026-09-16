@@ -14,11 +14,9 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       RepositoryName: rc-lambda-base
-      # Build tags are immutable; only the convenience tag "latest" may move.
-      ImageTagMutability: IMMUTABLE_WITH_EXCLUSION
-      ImageTagMutabilityExclusionFilters:
-        - ImageTagMutabilityExclusionFilterType: WILDCARD
-          ImageTagMutabilityExclusionFilterValue: latest
+      # Every tag moves: one tag per branch, rewritten on each push to that branch,
+      # plus "latest" tracking main. Immutable identity comes from the digest.
+      ImageTagMutability: MUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
       EncryptionConfiguration:

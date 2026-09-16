@@ -1,4 +1,5 @@
 """Table-creation behaviors of rc-dynamo-sync."""
+
 from __future__ import annotations
 
 from . import dynamo_helpers as dh

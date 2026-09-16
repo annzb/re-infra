@@ -91,12 +91,19 @@ uv remove <package>
    ```bash
    cd images/lambda-base
    uv run pytest tests/unit
-   docker compose up -d --wait
-   uv run pytest tests/integration
+
+   docker compose up -d --wait          # LocalStack on :4566
+   AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test \
+     AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 \
+     uv run pytest tests/integration
    docker compose down
    ```
 
-4. Merge. `lambda-base.yml` builds and publishes a new immutable image. Existing
+   The integration suite refuses to run unless it is pointed at LocalStack with
+   those `test` credentials, so it can never touch a real table.
+
+4. Merge. `build.yml` builds the image, `test.yml` tests it, and only then is it
+   published. Existing
    application images are unchanged until `retribalize-core` rebuilds from the new
    digest.
 
@@ -113,14 +120,54 @@ docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-sync rc-lambda-bas
 
 The image is a parent image with no `CMD`; service images add their handler.
 
+## What runs what
+
+Every deployment starts with a workflow, which runs the repository's files in order.
+
+**On a pull request**
+
+```text
+1. .github/workflows/validate.yml
+   a. ruff / mypy / pytest      -> src/rc_infra/**, tests/**
+   b. cfn-lint infra/*.yaml     -> roles.yaml, platform.yaml, environment.yaml
+   c. rc-infra validate         -> cli.py -> catalog.py -> environments/catalog.yaml
+   d. rc-infra plan             -> planner.py -> cfn.py | buckets.py | tables.py,
+                                   reading infra/platform.yaml and infra/environment.yaml
+                                   -> plan in the run summary (fails on BLOCKED)
+2. .github/workflows/build.yml       (only when images/lambda-base/** changed)
+   a. build  -> images/lambda-base/Dockerfile -> image uploaded as an artifact
+   b. test   -> .github/workflows/test.yml -> pytest + smoke tests on that image
+              (nothing is published from a pull request)
+```
+
+**On merge to main**
+
+```text
+1. .github/workflows/deploy.yml -> rc-infra apply --yes -> apply.py
+   a. infra/platform.yaml    -> stack rc-platform
+   b. infra/environment.yaml -> stack rc-env-<name>, per catalog entry
+                                (create, import existing buckets, or update)
+   c. teardown.py            -> for environments removed from the catalog:
+                                rc-app-<name> -> tables -> buckets -> rc-env-<name>
+2. .github/workflows/build.yml
+   a. build   -> image artifact
+   b. test    -> .github/workflows/test.yml
+   c. publish -> ECR build tag -> scan -> latest -> SSM /rc/lambda-base/image-uri
+```
+
+**Manual, once:** `infra/roles.yaml` -> stack `rc-bootstrap` (the three IAM roles).
+
+**Elsewhere:** `retribalize-core` deploys `rc-app-<name>`, reading `/rc/env/<name>/*`
+and building its images from the published base-image digest.
+
 ## Stacks and ownership
 
 | Stack | Owner | Contents |
 |---|---|---|
 | `rc-bootstrap` | this repo, deployed manually once | GitHub OIDC roles: `rc-infra-plan`, `rc-infra-deploy`, `rc-infra-cfn-exec` |
-| `rc-platform` | this repo | ECR repositories `rc-lambda-base` and `rc-lambda-base-cache` |
+| `rc-platform` | this repo | ECR repository `rc-lambda-base` |
 | `rc-env-<name>` | this repo | Buckets and `/rc/env/<name>/*` SSM parameters |
-| `rc-identity` | future | Shared Cognito resources (see [`infrastructure/identity`](infrastructure/identity/README.md)) |
+| `rc-identity` | future | Shared Cognito resources (see [`infra/identity.md`](infra/identity.md)) |
 | `rc-app-<name>` | `retribalize-core` | The application SAM stack |
 
 DynamoDB tables are owned by `rc-dynamo-sync`, run from `retribalize-core`, never by
@@ -143,7 +190,7 @@ CloudFormation.
    ```bash
    aws cloudformation deploy \
      --stack-name rc-bootstrap \
-     --template-file infrastructure/bootstrap/template.yaml \
+     --template-file infra/roles.yaml \
      --capabilities CAPABILITY_NAMED_IAM \
      --parameter-overrides GitHubOrg=annzb GitHubRepo=re-infra
    aws cloudformation update-termination-protection \
@@ -154,8 +201,8 @@ CloudFormation.
 
 2. Add repository **variables** (not secrets) from the stack outputs:
    `AWS_PLAN_ROLE_ARN`, `AWS_DEPLOY_ROLE_ARN`, `AWS_CFN_EXEC_ROLE_ARN`.
-3. Protect `main`: require pull requests, the `CI` checks, and CODEOWNERS review; block
-   force pushes and deletion.
+3. Protect `main`: require pull requests, the *Validate infrastructure* checks, and
+   CODEOWNERS review; block force pushes and deletion.
 4. Before the first merge that applies, run `uv run rc-infra plan` locally. Existing
    `prod`/`staging`/`dev` buckets appear as `IMPORT`, or as `BLOCKED` with the exact
    differences between the live bucket and the template. Change the **template** to
@@ -163,8 +210,9 @@ CloudFormation.
 
 ## Troubleshooting
 
-- **Workflow logs:** GitHub → Actions → *CI*, *Deploy infrastructure*, or *Lambda base
-  image*. The plan is in each run's summary.
+- **Workflow logs:** GitHub → Actions → *Validate infrastructure*, *Deploy
+  infrastructure*, *Build base image*, or *Test base image*. The plan is in the
+  validate and deploy run summaries.
 - **See the plan without applying:** `uv run rc-infra plan` (or `apply` without
   `--yes`).
 - **Inspect a stack:**

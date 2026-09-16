@@ -38,14 +38,16 @@ reported on a dry run but do not count as pending schema changes.
 See rc_lambda_base.dynamo.schema_diff for the classification and for the
 elements this tooling deliberately does not manage (TTL, streams, PITR, LSIs).
 """
+
 from __future__ import annotations
 
 import gzip
 import importlib
 import json
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from botocore.exceptions import ClientError
@@ -76,12 +78,12 @@ class SchemaSyncError(RuntimeError):
     pass
 
 
-def _settings(settings: Optional[Settings]) -> Settings:
+def _settings(settings: Settings | None) -> Settings:
     return settings if settings is not None else Settings.from_env()
 
 
 def _utc_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 # ─────────────────────────── schema module contract ───────────────────────────
@@ -110,9 +112,13 @@ def load_schema_tables(module_name: str) -> Mapping[str, BaseTable[Any]]:
             f"{module_name}.TABLES must be a mapping of name -> BaseTable instance, "
             f"not {type(tables).__name__}"
         )
-    invalid = sorted(str(name) for name, value in tables.items() if not isinstance(value, BaseTable))
+    invalid = sorted(
+        str(name) for name, value in tables.items() if not isinstance(value, BaseTable)
+    )
     if invalid:
-        raise SchemaSyncError(f"{module_name}.TABLES entries are not BaseTable instances: {invalid}")
+        raise SchemaSyncError(
+            f"{module_name}.TABLES entries are not BaseTable instances: {invalid}"
+        )
     return tables
 
 
@@ -121,7 +127,7 @@ def select_tables(
     table_arg: str,
     *,
     module_name: str = "the schema module",
-) -> List[BaseTable[Any]]:
+) -> list[BaseTable[Any]]:
     """Resolve ``--tables``: ``all`` or comma-separated ``TABLES`` keys."""
     if table_arg.strip() == "all":
         return list(tables.values())
@@ -141,7 +147,7 @@ def select_tables(
 # ─────────────────────────── tags ───────────────────────────
 
 
-def managed_tags(environment: str, extra: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+def managed_tags(environment: str, extra: Mapping[str, str] | None = None) -> dict[str, str]:
     """The ownership tags written to every table this tool manages."""
     if not environment:
         raise SchemaSyncError("An environment name is required to tag managed tables")
@@ -149,7 +155,9 @@ def managed_tags(environment: str, extra: Optional[Mapping[str, str]] = None) ->
     extra_tags = dict(extra or {})
     clashes = sorted(RESERVED_TAG_KEYS & set(extra_tags))
     if clashes:
-        raise SchemaSyncError(f"Tag key(s) {clashes} are set by {MANAGED_BY} and cannot be overridden")
+        raise SchemaSyncError(
+            f"Tag key(s) {clashes} are set by {MANAGED_BY} and cannot be overridden"
+        )
 
     return {
         "ManagedBy": MANAGED_BY,
@@ -159,14 +167,14 @@ def managed_tags(environment: str, extra: Optional[Mapping[str, str]] = None) ->
     }
 
 
-def _boto_tags(tags: Mapping[str, str]) -> List[Dict[str, str]]:
+def _boto_tags(tags: Mapping[str, str]) -> list[dict[str, str]]:
     return [{"Key": key, "Value": value} for key, value in sorted(tags.items())]
 
 
-def _table_arn_and_tags(client: Any, table_name: str) -> Tuple[str, Dict[str, str]]:
+def _table_arn_and_tags(client: Any, table_name: str) -> tuple[str, dict[str, str]]:
     arn = client.describe_table(TableName=table_name)["Table"]["TableArn"]
-    live: Dict[str, str] = {}
-    kwargs: Dict[str, Any] = {"ResourceArn": arn}
+    live: dict[str, str] = {}
+    kwargs: dict[str, Any] = {"ResourceArn": arn}
     while True:
         response = client.list_tags_of_resource(**kwargs)
         live.update({tag["Key"]: tag["Value"] for tag in response.get("Tags", [])})
@@ -176,7 +184,9 @@ def _table_arn_and_tags(client: Any, table_name: str) -> Tuple[str, Dict[str, st
         kwargs["NextToken"] = token
 
 
-def ensure_table_tags(table: BaseTable[Any], tags: Mapping[str, str], *, apply: bool) -> Dict[str, str]:
+def ensure_table_tags(
+    table: BaseTable[Any], tags: Mapping[str, str], *, apply: bool
+) -> dict[str, str]:
     """Add missing or different ownership tags. Returns the tags that differed.
 
     Additive only: tags this tool does not set are left alone. A table that does
@@ -223,14 +233,14 @@ def _table_diff(table: BaseTable[Any]) -> SchemaDiff:
     return diff_schemas(expected, actual)
 
 
-def _granted_permissions(settings: Settings) -> Dict[Permission, bool]:
+def _granted_permissions(settings: Settings) -> dict[Permission, bool]:
     return {
         Permission.PRUNE_UNDECLARED: settings.prune_undeclared,
         Permission.ALLOW_TABLE_RECREATE: settings.allow_table_recreate,
     }
 
 
-def _key_schema_to_boto(schema: Mapping[str, Optional[str]]) -> List[Dict[str, str]]:
+def _key_schema_to_boto(schema: Mapping[str, str | None]) -> list[dict[str, str]]:
     partition_key = schema.get("partition_key")
     if not partition_key:
         raise SchemaSyncError(f"Invalid key schema without partition_key: {schema}")
@@ -242,14 +252,14 @@ def _key_schema_to_boto(schema: Mapping[str, Optional[str]]) -> List[Dict[str, s
     return key_schema
 
 
-def _collect_attribute_definitions(schema: Mapping[str, Any]) -> List[Dict[str, str]]:
+def _collect_attribute_definitions(schema: Mapping[str, Any]) -> list[dict[str, str]]:
     # TODO: BaseTable.expected_schema() reports key types in a top-level
     # "attribute_types" map and never sets partition_key_type/sort_key_type, so
     # every attribute below is created as "S". Harmless while every declared key
     # is a string, but a non-string GSI key would be created with the wrong type.
-    attribute_types: Dict[str, str] = {}
+    attribute_types: dict[str, str] = {}
 
-    def add_key(key_schema: Mapping[str, Optional[str]]) -> None:
+    def add_key(key_schema: Mapping[str, str | None]) -> None:
         pk = key_schema.get("partition_key")
         sk = key_schema.get("sort_key")
         pk_type = key_schema.get("partition_key_type") or "S"
@@ -283,7 +293,7 @@ def _wait_table_deleted(client: Any, table_name: str, settings: Settings) -> Non
     )
 
 
-def wait_table_active(client: Any, table_name: str, *, settings: Optional[Settings] = None) -> None:
+def wait_table_active(client: Any, table_name: str, *, settings: Settings | None = None) -> None:
     settings = _settings(settings)
     poll_seconds = settings.schema_poll_seconds
     timeout_seconds = settings.schema_wait_timeout_seconds
@@ -302,10 +312,7 @@ def wait_table_active(client: Any, table_name: str, *, settings: Optional[Settin
             }
             for gsi in table.get("GlobalSecondaryIndexes", [])
         }
-        all_gsis_active = all(
-            progress["status"] == "ACTIVE"
-            for progress in gsi_progress.values()
-        )
+        all_gsis_active = all(progress["status"] == "ACTIVE" for progress in gsi_progress.values())
         elapsed_seconds = time.monotonic() - started_at
 
         if table_status == "ACTIVE" and all_gsis_active:
@@ -341,10 +348,10 @@ def wait_table_active(client: Any, table_name: str, *, settings: Optional[Settin
 
 def create_table(
     table: BaseTable[Any],
-    live_gsis: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    live_gsis: Mapping[str, Mapping[str, Any]] | None = None,
     *,
-    settings: Optional[Settings] = None,
-    tags: Optional[Mapping[str, str]] = None,
+    settings: Settings | None = None,
+    tags: Mapping[str, str] | None = None,
 ) -> None:
     """Create the table from its declaration.
 
@@ -362,7 +369,7 @@ def create_table(
         print(f"[schema-sync] Table already exists: {table_name}")
         return
 
-    create_gsis: Dict[str, Mapping[str, Any]] = dict(expected.get("gsis", {}))
+    create_gsis: dict[str, Mapping[str, Any]] = dict(expected.get("gsis", {}))
 
     # Carry over indexes the code does not declare. A recreate must not become a
     # back door for deleting undeclared work -- that is what DYNAMO_PRUNE_UNDECLARED
@@ -387,13 +394,15 @@ def create_table(
     ]
 
     # Attribute definitions must cover every preserved index's keys too.
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "TableName": table_name,
         "BillingMode": "PAY_PER_REQUEST",
-        "AttributeDefinitions": _collect_attribute_definitions({
-            "key_schema": expected["key_schema"],
-            "gsis": create_gsis,
-        }),
+        "AttributeDefinitions": _collect_attribute_definitions(
+            {
+                "key_schema": expected["key_schema"],
+                "gsis": create_gsis,
+            }
+        ),
         "KeySchema": _key_schema_to_boto(expected["key_schema"]),
     }
 
@@ -411,8 +420,8 @@ def _resolved_projection(
     table_name: str,
     index_name: str,
     declared_gsi: Mapping[str, Any],
-    live_gsi: Optional[Mapping[str, Any]],
-) -> Dict[str, Any]:
+    live_gsi: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     projection = resolve_projection(declared_gsi, live_gsi)
 
     if declared_gsi.get("projection") is None:
@@ -435,12 +444,13 @@ def _resolved_projection(
 # ─────────────────────────── dump / restore ───────────────────────────
 
 
-def require_dump_bucket(bucket: Optional[str], *, settings: Optional[Settings] = None) -> str:
+def require_dump_bucket(bucket: str | None, *, settings: Settings | None = None) -> str:
     """Fail unless ``bucket`` names an existing S3 bucket. Never creates it."""
     settings = _settings(settings)
     if not bucket:
         raise SchemaSyncError(
-            "--dump-bucket or DYNAMO_SCHEMA_DUMP_BUCKET is required when DYNAMO_ALLOW_TABLE_RECREATE=true"
+            "--dump-bucket or DYNAMO_SCHEMA_DUMP_BUCKET is required when "
+            "DYNAMO_ALLOW_TABLE_RECREATE=true"
         )
 
     try:
@@ -457,9 +467,9 @@ def require_dump_bucket(bucket: Optional[str], *, settings: Optional[Settings] =
     return bucket
 
 
-def _scan_all_raw(table: BaseTable[Any]) -> List[Dict[str, Any]]:
-    raw_items: List[Dict[str, Any]] = []
-    scan_kwargs: Dict[str, Any] = {}
+def _scan_all_raw(table: BaseTable[Any]) -> list[dict[str, Any]]:
+    raw_items: list[dict[str, Any]] = []
+    scan_kwargs: dict[str, Any] = {}
 
     while True:
         response = table.table.scan(**scan_kwargs)
@@ -472,7 +482,9 @@ def _scan_all_raw(table: BaseTable[Any]) -> List[Dict[str, Any]]:
         scan_kwargs["ExclusiveStartKey"] = last_key
 
 
-def _dump_table_to_s3(table: BaseTable[Any], bucket_name: str, settings: Settings) -> Dict[str, str]:
+def _dump_table_to_s3(
+    table: BaseTable[Any], bucket_name: str, settings: Settings
+) -> dict[str, str]:
     s3_client = aws.client("s3", settings)
 
     raw_items = _scan_all_raw(table)
@@ -480,7 +492,9 @@ def _dump_table_to_s3(table: BaseTable[Any], bucket_name: str, settings: Setting
     body = gzip.compress(json.dumps(serializable_items, separators=(",", ":")).encode("utf-8"))
     key = f"dynamo-schema-sync/{table.table_name}/{_utc_stamp()}-{uuid4().hex}.json.gz"
 
-    print(f"[schema-sync] Dumping {len(serializable_items)} rows from {table.table_name} to s3://{bucket_name}/{key}")
+    print(
+        f"[schema-sync] Dumping {len(serializable_items)} rows from {table.table_name} to s3://{bucket_name}/{key}"
+    )
 
     s3_client.put_object(
         Bucket=bucket_name,
@@ -497,7 +511,7 @@ def _dump_table_to_s3(table: BaseTable[Any], bucket_name: str, settings: Setting
     }
 
 
-def _load_dump_from_s3(dump_ref: Mapping[str, str], settings: Settings) -> List[Dict[str, Any]]:
+def _load_dump_from_s3(dump_ref: Mapping[str, str], settings: Settings) -> list[dict[str, Any]]:
     s3_client = aws.client("s3", settings)
     response = s3_client.get_object(Bucket=dump_ref["bucket"], Key=dump_ref["key"])
     payload = gzip.decompress(response["Body"].read()).decode("utf-8")
@@ -517,18 +531,10 @@ def _required_key_fields(table: BaseTable[Any]) -> set[str]:
     return fields
 
 
-def _strict_restore_item(table: BaseTable[Any], raw_item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _strict_restore_item(table: BaseTable[Any], raw_item: dict[str, Any]) -> dict[str, Any] | None:
     allowed_fields = set(table.item_model.model_fields)
-    filtered = {
-        key: value
-        for key, value in raw_item.items()
-        if key in allowed_fields
-    }
-    missing_keys = [
-        key
-        for key in _required_key_fields(table)
-        if key not in filtered
-    ]
+    filtered = {key: value for key, value in raw_item.items() if key in allowed_fields}
+    missing_keys = [key for key in _required_key_fields(table) if key not in filtered]
 
     if missing_keys:
         print(f"[schema-sync] Skipping item missing new key fields {missing_keys}: {raw_item}")
@@ -536,7 +542,7 @@ def _strict_restore_item(table: BaseTable[Any], raw_item: Dict[str, Any]) -> Opt
 
     try:
         model_item = table.item_model(**filtered)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(
             f"[schema-sync] Skipping item that does not validate against "
             f"{table.item_model.__name__}: {exc}; item={filtered}"
@@ -546,12 +552,10 @@ def _strict_restore_item(table: BaseTable[Any], raw_item: Dict[str, Any]) -> Opt
     return table._to_item(model_item)
 
 
-def _permissive_restore_item(table: BaseTable[Any], raw_item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    missing_keys = [
-        key
-        for key in _required_key_fields(table)
-        if key not in raw_item
-    ]
+def _permissive_restore_item(
+    table: BaseTable[Any], raw_item: dict[str, Any]
+) -> dict[str, Any] | None:
+    missing_keys = [key for key in _required_key_fields(table) if key not in raw_item]
 
     if missing_keys:
         print(f"[schema-sync] Skipping item missing new key fields {missing_keys}: {raw_item}")
@@ -560,7 +564,9 @@ def _permissive_restore_item(table: BaseTable[Any], raw_item: Dict[str, Any]) ->
     return numeric.float_to_decimal(raw_item)
 
 
-def _restore_table_from_s3(table: BaseTable[Any], dump_ref: Mapping[str, str], settings: Settings) -> None:
+def _restore_table_from_s3(
+    table: BaseTable[Any], dump_ref: Mapping[str, str], settings: Settings
+) -> None:
     raw_items = _load_dump_from_s3(dump_ref, settings)
 
     if not raw_items:
@@ -569,7 +575,7 @@ def _restore_table_from_s3(table: BaseTable[Any], dump_ref: Mapping[str, str], s
 
     restored = 0
     skipped = 0
-    batch: List[Dict[str, Any]] = []
+    batch: list[dict[str, Any]] = []
 
     for raw_item in raw_items:
         if table.insert_unknown_columns_on_recreate:
@@ -593,14 +599,11 @@ def _restore_table_from_s3(table: BaseTable[Any], dump_ref: Mapping[str, str], s
     print(f"[schema-sync] Restored {restored} rows into {table.table_name}; skipped {skipped}")
 
 
-def _batch_write_items(table: BaseTable[Any], items: Sequence[Dict[str, Any]], settings: Settings) -> int:
+def _batch_write_items(
+    table: BaseTable[Any], items: Sequence[dict[str, Any]], settings: Settings
+) -> int:
     client = table.table.meta.client
-    request_items = {
-        table.table_name: [
-            {"PutRequest": {"Item": item}}
-            for item in items
-        ]
-    }
+    request_items = {table.table_name: [{"PutRequest": {"Item": item}} for item in items]}
 
     written = len(items)
 
@@ -611,7 +614,10 @@ def _batch_write_items(table: BaseTable[Any], items: Sequence[Dict[str, Any]], s
             return written
 
         request_items = unprocessed
-        print(f"[schema-sync] Retrying {sum(len(v) for v in unprocessed.values())} unprocessed write(s)")
+        print(
+            f"[schema-sync] Retrying {sum(len(v) for v in unprocessed.values())} "
+            "unprocessed write(s)"
+        )
         time.sleep(settings.schema_poll_seconds)
 
     return written
@@ -637,7 +643,7 @@ def _recreate_table(
     table: BaseTable[Any],
     dump_bucket: str,
     settings: Settings,
-    tags: Optional[Mapping[str, str]],
+    tags: Mapping[str, str] | None,
 ) -> None:
     # Capture the live GSIs BEFORE dropping the table: projection is immutable
     # and unmodeled ones are inherited, so once the table is gone that
@@ -671,7 +677,7 @@ def _create_gsi(
     table: BaseTable[Any],
     index_name: str,
     gsi_schema: Mapping[str, Any],
-    live_gsi: Optional[Mapping[str, Any]],
+    live_gsi: Mapping[str, Any] | None,
     settings: Settings,
 ) -> None:
     client = table.table.meta.client
@@ -710,9 +716,9 @@ def _apply_findings(
     table: BaseTable[Any],
     findings: Sequence[Finding],
     *,
-    dump_bucket: Optional[str],
+    dump_bucket: str | None,
     settings: Settings,
-    tags: Optional[Mapping[str, str]],
+    tags: Mapping[str, str] | None,
 ) -> None:
     """Execute the remedies for one table, cheapest blast radius first.
 
@@ -721,12 +727,14 @@ def _apply_findings(
     under the 20-GSI limit), then rebuild conflicting ones pairwise, then create
     what is missing.
     """
-    live_gsis = table.actual_schema().get("gsis", {}) if _table_exists(
-        table.table.meta.client, table.table_name
-    ) else {}
+    live_gsis = (
+        table.actual_schema().get("gsis", {})
+        if _table_exists(table.table.meta.client, table.table_name)
+        else {}
+    )
     expected_gsis = table.expected_schema().get("gsis", {})
 
-    by_remedy: Dict[Remedy, List[Finding]] = {}
+    by_remedy: dict[Remedy, list[Finding]] = {}
     for finding in findings:
         by_remedy.setdefault(finding.remedy, []).append(finding)
 
@@ -753,11 +761,15 @@ def _apply_findings(
         )
         print(f"[schema-sync]   {finding.message}")
         _delete_gsi(table, index_name, settings)
-        _create_gsi(table, index_name, expected_gsis[index_name], live_gsis.get(index_name), settings)
+        _create_gsi(
+            table, index_name, expected_gsis[index_name], live_gsis.get(index_name), settings
+        )
 
     for finding in by_remedy.get(Remedy.CREATE_GSI, []):
         index_name = str(finding.index_name)
-        _create_gsi(table, index_name, expected_gsis[index_name], live_gsis.get(index_name), settings)
+        _create_gsi(
+            table, index_name, expected_gsis[index_name], live_gsis.get(index_name), settings
+        )
 
 
 # ─────────────────────────── orchestration ───────────────────────────
@@ -788,10 +800,10 @@ def _sync_table(
     table: BaseTable[Any],
     *,
     apply: bool,
-    dump_bucket: Optional[str],
+    dump_bucket: str | None,
     granted: Mapping[Permission, bool],
     settings: Settings,
-    tags: Optional[Mapping[str, str]],
+    tags: Mapping[str, str] | None,
 ) -> bool:
     """Reconcile one table. Returns whether anything differed from the declaration."""
     client = table.table.meta.client
@@ -808,11 +820,13 @@ def _sync_table(
 
     blocked = diff.blocked(granted)
     if blocked:
-        needed = sorted({
-            PERMISSION_ENV_VARS[f.required_permission]
-            for f in blocked
-            if f.required_permission is not None
-        })
+        needed = sorted(
+            {
+                PERMISSION_ENV_VARS[f.required_permission]
+                for f in blocked
+                if f.required_permission is not None
+            }
+        )
         detail = "\n".join(f"  - {f.message}" for f in blocked)
         raise SchemaSyncError(
             f"Refusing to recreate or prune {table_name} without permission.\n"
@@ -832,7 +846,7 @@ def _sync_table(
 def _unresolved_after_apply(
     table: BaseTable[Any],
     granted: Mapping[Permission, bool],
-) -> Tuple[Finding, ...]:
+) -> tuple[Finding, ...]:
     """Findings that --apply should have fixed but did not.
 
     Re-reads the live schema. UNDECLARED findings are excluded: leaving those
@@ -845,9 +859,9 @@ def sync_tables(
     tables: Sequence[BaseTable[Any]],
     *,
     apply: bool,
-    settings: Optional[Settings] = None,
-    dump_bucket: Optional[str] = None,
-    tags: Optional[Mapping[str, str]] = None,
+    settings: Settings | None = None,
+    dump_bucket: str | None = None,
+    tags: Mapping[str, str] | None = None,
 ) -> bool:
     """Reconcile ``tables``; return whether any schema differed from its declaration.
 
@@ -874,14 +888,17 @@ def sync_tables(
     any_diff = False
 
     for table in tables:
-        any_diff = _sync_table(
-            table,
-            apply=apply,
-            dump_bucket=dump_bucket,
-            granted=granted,
-            settings=settings,
-            tags=tags,
-        ) or any_diff
+        any_diff = (
+            _sync_table(
+                table,
+                apply=apply,
+                dump_bucket=dump_bucket,
+                granted=granted,
+                settings=settings,
+                tags=tags,
+            )
+            or any_diff
+        )
         if tags:
             ensure_table_tags(table, tags, apply=apply)
 

@@ -1,7 +1,7 @@
 version: 2
 
-# Updates arrive as pull requests and go through the same review and plan as any
-# other change. Never enable auto-merge here.
+# Updates arrive as pull requests and go through the same review and plan as any other change.
+# Never enable auto-merge here.
 updates:
   - package-ecosystem: github-actions
     directory: /

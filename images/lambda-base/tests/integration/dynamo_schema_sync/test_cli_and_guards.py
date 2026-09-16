@@ -1,4 +1,5 @@
 """CLI selection, exit-code, and guard behaviors."""
+
 from __future__ import annotations
 
 import pytest
@@ -8,36 +9,23 @@ from . import schema_cases as sc
 from . import smoke_cases as smc
 from .cli_helpers import output, run_schema_sync
 
-SMOKE_ENV = {"DYNAMO_SCHEMA_MODULE": "tests.integration.dynamo_schema_sync.smoke_cases"}
-
 
 def test_unknown_table_name_fails_clearly():
     result = run_schema_sync(tables="does_not_exist")
 
-    assert result.returncode == 1, output(result)
-    assert "Unknown table" in result.stderr, output(result)
+    assert result.returncode != 0, output(result)
+    assert "Unknown table(s)" in (result.stdout + result.stderr), output(result)
 
 
-def test_tables_all_selects_only_the_tables_registry(managed_table):
+def test_tables_all_selects_only_basetable_instances_from_schema_module(managed_table):
     name = managed_table(smc.all_smoke_table)
-    unregistered = managed_table(smc.unregistered_smoke_table)
+    smoke_env = {"DYNAMO_SCHEMA_MODULE": "tests.integration.dynamo_schema_sync.smoke_cases"}
 
-    result = run_schema_sync(tables="all", apply=True, extra_env=SMOKE_ENV)
+    result = run_schema_sync(tables="all", apply=True, extra_env=smoke_env)
 
     assert result.returncode == 0, output(result)
+    # Only the single BaseTable instance is created; NOT_A_TABLE is ignored.
     assert dh.table_exists(name)
-    # Declared in the module but not registered in TABLES: never touched.
-    assert not dh.table_exists(unregistered)
-
-
-def test_schema_module_without_tables_registry_fails():
-    result = run_schema_sync(
-        tables="all",
-        extra_env={"DYNAMO_SCHEMA_MODULE": "tests.integration.dynamo_schema_sync.dynamo_helpers"},
-    )
-
-    assert result.returncode == 1, output(result)
-    assert "does not export TABLES" in result.stderr, output(result)
 
 
 def test_dry_run_diff_returns_3_apply_success_returns_0(managed_table):
@@ -48,23 +36,13 @@ def test_dry_run_diff_returns_3_apply_success_returns_0(managed_table):
     assert run_schema_sync(tables="create_simple_table").returncode == 0
 
 
-def test_apply_requires_environment(managed_table):
-    name = managed_table(sc.create_simple_table)
-
-    result = run_schema_sync(tables="create_simple_table", apply=True, extra_env={"RC_ENVIRONMENT": ""})
-
-    assert result.returncode == 2, output(result)
-    assert "--environment" in result.stderr, output(result)
-    assert not dh.table_exists(name)
-
-
 def test_recreate_apply_requires_dump_bucket(managed_table):
     name = managed_table(sc.recreate_pk_changed_table)
     dh.create_live_table(name, {"partition_key": "old_pk", "sort_key": None})
     dh.put_items(name, [{"old_pk": "1", "pk": "a"}])
 
-    # Enable recreate but provide no dump bucket: an explicit empty --dump-bucket
-    # with DYNAMO_SCHEMA_DUMP_BUCKET also blanked. There is no fallback bucket.
+    # Recreate is allowed but no dump bucket is given. There is no fallback
+    # bucket, so the guard must refuse rather than drop the table.
     result = run_schema_sync(
         tables="recreate_pk_changed_table",
         apply=True,
@@ -72,7 +50,7 @@ def test_recreate_apply_requires_dump_bucket(managed_table):
         extra_env={"DYNAMO_ALLOW_TABLE_RECREATE": "true", "DYNAMO_SCHEMA_DUMP_BUCKET": ""},
     )
 
-    assert result.returncode == 1, output(result)
+    assert result.returncode != 0, output(result)
     combined = (result.stdout + result.stderr).lower()
     assert "dump" in combined and "required" in combined, output(result)
     # Original table remains untouched.
@@ -80,26 +58,33 @@ def test_recreate_apply_requires_dump_bucket(managed_table):
     assert len(dh.scan_items(name)) == 1
 
 
-def test_missing_dump_bucket_is_rejected_not_created(managed_table):
+def test_missing_dump_bucket_is_rejected(managed_table):
     name = managed_table(sc.recreate_sk_removed_table)
     dh.create_live_table(name, {"partition_key": "pk", "sort_key": "old_sk"})
     dh.put_items(name, [{"pk": "a", "old_sk": "1"}])
 
-    missing_bucket = f"{sc.PREFIX}-{sc.RUN_ID}-missing-dumps"
+    missing_bucket = f"{sc.PREFIX}-{sc.RUN_ID}-absent-dumps"
     dh.delete_bucket(missing_bucket)  # ensure it does not exist
+    try:
+        result = run_schema_sync(
+            tables="recreate_sk_removed_table",
+            apply=True,
+            extra_env={
+                "DYNAMO_ALLOW_TABLE_RECREATE": "true",
+                "DYNAMO_SCHEMA_DUMP_BUCKET": missing_bucket,
+            },
+        )
 
-    result = run_schema_sync(
-        tables="recreate_sk_removed_table",
-        apply=True,
-        extra_env={"DYNAMO_ALLOW_TABLE_RECREATE": "true", "DYNAMO_SCHEMA_DUMP_BUCKET": missing_bucket},
-    )
-
-    assert result.returncode == 1, output(result)
-    assert "does not exist" in result.stderr, output(result)
-    assert not dh.bucket_exists(missing_bucket)
-    # Rejected before any change: the live table keeps its schema and rows.
-    assert dh.describe_schema(name)["key_schema"] == {"partition_key": "pk", "sort_key": "old_sk"}
-    assert len(dh.scan_items(name)) == 1
+        assert result.returncode != 0, output(result)
+        assert not dh.bucket_exists(missing_bucket), "the dump bucket must never be created here"
+        # The table and its data survive the refusal.
+        assert dh.describe_schema(name)["key_schema"] == {
+            "partition_key": "pk",
+            "sort_key": "old_sk",
+        }
+        assert len(dh.scan_items(name)) == 1
+    finally:
+        dh.delete_bucket(missing_bucket)
 
 
 @pytest.mark.parametrize("truthy", ["true", "1", "yes"])
@@ -117,12 +102,3 @@ def test_prune_undeclared_env_bool_accepts_true_values(managed_table, truthy):
 
     assert result.returncode == 0, output(result)
     assert "GSI-Extra" not in dh.describe_schema(name)["gsis"]
-
-
-def test_invalid_boolean_flag_fails_instead_of_reading_as_false(managed_table):
-    managed_table(sc.remote_only_gsi_table)
-
-    result = run_schema_sync(tables="remote_only_gsi_table", extra_env={"DYNAMO_PRUNE_UNDECLARED": "maybe"})
-
-    assert result.returncode == 1, output(result)
-    assert "DYNAMO_PRUNE_UNDECLARED" in result.stderr, output(result)

@@ -1,6 +1,7 @@
 """Schema-sync helpers that need no DynamoDB: tags, dump-bucket guard, create params."""
+
 from types import SimpleNamespace
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import pytest
 from botocore.exceptions import ClientError
@@ -22,7 +23,7 @@ FAST = Settings(schema_poll_seconds=0.01, schema_wait_timeout_seconds=1)
 class _Item(BaseItem):
     partition_key: ClassVar[str] = "pk"
     pk: str
-    note: Optional[str] = None
+    note: str | None = None
 
 
 class _Table(BaseTable[_Item]):
@@ -31,7 +32,9 @@ class _Table(BaseTable[_Item]):
 
 
 def _not_found(operation: str) -> ClientError:
-    return ClientError({"Error": {"Code": "ResourceNotFoundException", "Message": "missing"}}, operation)
+    return ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "missing"}}, operation
+    )
 
 
 def _table_on(client) -> _Table:
@@ -49,12 +52,17 @@ class _TagClient:
     def describe_table(self, TableName):
         if not self.exists:
             raise _not_found("DescribeTable")
-        return {"Table": {"TableName": TableName, "TableArn": f"arn:aws:dynamodb:us-east-1:000000000000:table/{TableName}"}}
+        return {
+            "Table": {
+                "TableName": TableName,
+                "TableArn": f"arn:aws:dynamodb:us-east-1:000000000000:table/{TableName}",
+            }
+        }
 
     def list_tags_of_resource(self, ResourceArn, NextToken=None):
         items = sorted(self.live.items())
         start = int(NextToken or 0)
-        response = {"Tags": [{"Key": k, "Value": v} for k, v in items[start:start + 1]]}
+        response = {"Tags": [{"Key": k, "Value": v} for k, v in items[start : start + 1]]}
         if start + 1 < len(items):
             response["NextToken"] = str(start + 1)
         return response
@@ -64,6 +72,7 @@ class _TagClient:
 
 
 # ───────────────────────── managed_tags ─────────────────────────
+
 
 def test_managed_tags_include_ownership_and_extras():
     assert managed_tags("preview3", {"Repository": "retribalize-core"}) == {
@@ -86,6 +95,7 @@ def test_managed_tags_refuse_to_override_ownership_keys():
 
 # ───────────────────────── ensure_table_tags ─────────────────────────
 
+
 def test_apply_adds_only_missing_or_different_tags_across_pages():
     client = _TagClient({"ManagedBy": "rc-dynamo-sync", "Environment": "old", "Team": "growth"})
     wanted = managed_tags("preview3")
@@ -93,10 +103,15 @@ def test_apply_adds_only_missing_or_different_tags_across_pages():
     changes = ensure_table_tags(_table_on(client), wanted, apply=True)
 
     assert changes == {"LifecycleOwner": "rc-dynamo-sync", "Environment": "preview3"}
-    assert client.tag_calls == [(
-        "arn:aws:dynamodb:us-east-1:000000000000:table/rc-preview3-things",
-        [{"Key": "Environment", "Value": "preview3"}, {"Key": "LifecycleOwner", "Value": "rc-dynamo-sync"}],
-    )]
+    assert client.tag_calls == [
+        (
+            "arn:aws:dynamodb:us-east-1:000000000000:table/rc-preview3-things",
+            [
+                {"Key": "Environment", "Value": "preview3"},
+                {"Key": "LifecycleOwner", "Value": "rc-dynamo-sync"},
+            ],
+        )
+    ]
 
 
 def test_dry_run_reports_missing_tags_without_writing(capsys):
@@ -123,6 +138,7 @@ def test_missing_table_has_nothing_to_tag():
 
 # ───────────────────────── create_table ─────────────────────────
 
+
 class _CreateClient:
     def __init__(self):
         self.created = None
@@ -130,7 +146,9 @@ class _CreateClient:
     def describe_table(self, TableName):
         if self.created is None:
             raise _not_found("DescribeTable")
-        return {"Table": {"TableName": TableName, "TableStatus": "ACTIVE", "GlobalSecondaryIndexes": []}}
+        return {
+            "Table": {"TableName": TableName, "TableStatus": "ACTIVE", "GlobalSecondaryIndexes": []}
+        }
 
     def create_table(self, **params):
         self.created = params
@@ -139,7 +157,9 @@ class _CreateClient:
 def test_create_table_writes_tags_with_the_table():
     client = _CreateClient()
 
-    create_table(_table_on(client), settings=FAST, tags=managed_tags("preview3", {"Repository": "core"}))
+    create_table(
+        _table_on(client), settings=FAST, tags=managed_tags("preview3", {"Repository": "core"})
+    )
 
     assert client.created["TableName"] == "rc-preview3-things"
     assert client.created["BillingMode"] == "PAY_PER_REQUEST"
@@ -158,6 +178,7 @@ def test_create_table_without_tags_sends_no_tags():
 
 
 # ───────────────────────── dump bucket ─────────────────────────
+
 
 @pytest.mark.parametrize("bucket", [None, ""])
 def test_dump_bucket_is_required(bucket):

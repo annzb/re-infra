@@ -3,7 +3,7 @@
 
 # Changes here create, import, or delete AWS resources.
 /environments/              @annzb
-/infrastructure/            @annzb
+/infra/                     @annzb
 /src/rc_infra/              @annzb
 /.github/workflows/         @annzb
 

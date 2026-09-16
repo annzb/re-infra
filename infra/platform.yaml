@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Retribalize shared platform resources (stack rc-platform): the Lambda base
-  image repository and its BuildKit cache. Deployed by `rc-infra apply`.
+  Retribalize shared platform resources (stack rc-platform): the repository for
+  the Lambda base image. Deployed by `rc-infra apply`.
 
 # The current base-image digest is published to SSM (/rc/lambda-base/image-uri)
-# by .github/workflows/lambda-base.yml, not by this stack, so every build does
-# not register as drift.
+# by .github/workflows/build.yml, not by this stack, so every build does not
+# register as drift.
 
 Resources:
   LambdaBaseRepository:
@@ -51,36 +51,7 @@ Resources:
               - ecr:BatchGetImage
               - ecr:GetDownloadUrlForLayer
 
-  LambdaBaseCacheRepository:
-    Type: AWS::ECR::Repository
-    DeletionPolicy: Delete
-    Properties:
-      RepositoryName: rc-lambda-base-cache
-      ImageTagMutability: MUTABLE
-      EncryptionConfiguration:
-        EncryptionType: AES256
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Expire untagged cache manifests after 7 days",
-                "selection": {
-                  "tagStatus": "untagged",
-                  "countType": "sinceImagePushed",
-                  "countUnit": "days",
-                  "countNumber": 7
-                },
-                "action": {"type": "expire"}
-              }
-            ]
-          }
-
 Outputs:
   LambdaBaseRepositoryUri:
     Value:
       Fn::GetAtt: [LambdaBaseRepository, RepositoryUri]
-  LambdaBaseCacheRepositoryUri:
-    Value:
-      Fn::GetAtt: [LambdaBaseCacheRepository, RepositoryUri]

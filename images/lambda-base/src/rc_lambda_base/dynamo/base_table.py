@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, Generic, List, Mapping, Optional, Type
+from typing import Any, Generic
 from uuid import uuid4
 
 from boto3.dynamodb.conditions import Attr, Key
@@ -27,14 +28,14 @@ class ItemDoesNotExistError(TableError):
 
 @dataclass(frozen=True)
 class QueryPlan:
-    index_name: Optional[str]
+    index_name: str | None
     key_condition: Any
     filter_expression: Any
 
 
 class BaseTable(Generic[ItemType]):
-    table_name: str = ''
-    item_model: Type[ItemType]
+    table_name: str = ""
+    item_model: type[ItemType]
     insert_unknown_columns_on_recreate: bool = True
     generated_pk_max_attempts: int = 1
 
@@ -44,22 +45,22 @@ class BaseTable(Generic[ItemType]):
         if cls is BaseTable:
             return
 
-        table_name = getattr(cls, 'table_name', None)
+        table_name = getattr(cls, "table_name", None)
         if not isinstance(table_name, str):
-            raise TypeError(f'{cls.__name__} must define table_name as a string')
+            raise TypeError(f"{cls.__name__} must define table_name as a string")
 
-        item_model = getattr(cls, 'item_model', None)
+        item_model = getattr(cls, "item_model", None)
         if item_model is None:
-            raise TypeError(f'{cls.__name__} must define item_model')
+            raise TypeError(f"{cls.__name__} must define item_model")
         if not isinstance(item_model, type):
-            raise TypeError(f'{cls.__name__}.item_model must be a BaseItem class, not an instance')
+            raise TypeError(f"{cls.__name__}.item_model must be a BaseItem class, not an instance")
         if not issubclass(item_model, BaseItem):
-            raise TypeError(f'{cls.__name__}.item_model must inherit from BaseItem')
+            raise TypeError(f"{cls.__name__}.item_model must inherit from BaseItem")
         if item_model is BaseItem:
-            raise TypeError(f'{cls.__name__}.item_model cannot be BaseItem itself')
-        generated_pk_max_attempts = getattr(cls, 'generated_pk_max_attempts', None)
-        if (not isinstance(generated_pk_max_attempts, int) or generated_pk_max_attempts < 1):
-            raise TypeError(f'{cls.__name__}.generated_pk_max_attempts must be a positive integer')
+            raise TypeError(f"{cls.__name__}.item_model cannot be BaseItem itself")
+        generated_pk_max_attempts = getattr(cls, "generated_pk_max_attempts", None)
+        if not isinstance(generated_pk_max_attempts, int) or generated_pk_max_attempts < 1:
+            raise TypeError(f"{cls.__name__}.generated_pk_max_attempts must be a positive integer")
 
     def __init__(self, table: Any = None, *, resource: Any = None):
         """Bind the table lazily.
@@ -85,7 +86,7 @@ class BaseTable(Generic[ItemType]):
         return self.item_model.partition_key
 
     @property
-    def sk_name(self) -> Optional[str]:
+    def sk_name(self) -> str | None:
         return self.item_model.sort_key
 
     @property
@@ -93,59 +94,67 @@ class BaseTable(Generic[ItemType]):
         return self.item_model.gsis
 
     @property
-    def key_fields(self) -> List[str]:
+    def key_fields(self) -> list[str]:
         return self.item_model.key_fields()
 
-    def _to_item(self, item: ItemType, *, exclude_none: bool = True) -> Dict[str, Any]:
-        return numeric.float_to_decimal(item.model_dump(mode='python', exclude_none=exclude_none))
+    def _to_item(self, item: ItemType, *, exclude_none: bool = True) -> dict[str, Any]:
+        return numeric.float_to_decimal(item.model_dump(mode="python", exclude_none=exclude_none))
 
-    def _from_item(self, raw: Dict[str, Any]) -> ItemType:
+    def _from_item(self, raw: dict[str, Any]) -> ItemType:
         return self.item_model(**numeric.decimal_to_float(raw))
 
-    def _key_to_dict(self, key_value: KeyType) -> Dict[str, Any]:
+    def _key_to_dict(self, key_value: KeyType) -> dict[str, Any]:
         if self.sk_name is None:
             if isinstance(key_value, tuple):
-                raise ValueError(f'{self.__class__.__name__} does not have a sort key.')
+                raise ValueError(f"{self.__class__.__name__} does not have a sort key.")
             return {self.pk_name: key_value}
 
         if not isinstance(key_value, tuple) or len(key_value) != 2:
-            raise ValueError(f'{self.__class__.__name__} expected key tuple ({self.pk_name!r}, {self.sk_name!r})')
+            raise ValueError(
+                f"{self.__class__.__name__} expected key tuple ({self.pk_name!r}, {self.sk_name!r})"
+            )
 
-        return numeric.float_to_decimal({
-            self.pk_name: key_value[0],
-            self.sk_name: key_value[1],
-        })
+        return numeric.float_to_decimal(
+            {
+                self.pk_name: key_value[0],
+                self.sk_name: key_value[1],
+            }
+        )
 
     def _condition_failed(self, error: ClientError) -> bool:
-        return error.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException'
+        return error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
 
-    def _condition_exists(self, exists: bool) -> tuple[str, Dict[str, str]]:
-        fn = 'attribute_exists' if exists else 'attribute_not_exists'
-        return f'{fn}(#pk)', {'#pk': self.pk_name}
+    def _condition_exists(self, exists: bool) -> tuple[str, dict[str, str]]:
+        fn = "attribute_exists" if exists else "attribute_not_exists"
+        return f"{fn}(#pk)", {"#pk": self.pk_name}
 
     def _new_id(self, *args, **kwargs) -> str:
         return uuid4().hex
 
     def _validate_query_fields(self, field_values: Mapping[str, Any]) -> None:
-        invalid_fields = [field_name for field_name in field_values if field_name not in self.item_model.model_fields]
+        invalid_fields = [
+            field_name
+            for field_name in field_values
+            if field_name not in self.item_model.model_fields
+        ]
         if invalid_fields:
-            raise ValueError(f'{self.item_model.__name__} has no fields: {invalid_fields}')
+            raise ValueError(f"{self.item_model.__name__} has no fields: {invalid_fields}")
 
-        none_fields = [field_name for field_name, value in field_values.items()  if value is None]
+        none_fields = [field_name for field_name, value in field_values.items() if value is None]
         if none_fields:
-            raise ValueError(f'query_filter() does not support None values: {none_fields}')
-    
-    def _validate_return_column(self, return_column: Optional[str]) -> None:
+            raise ValueError(f"query_filter() does not support None values: {none_fields}")
+
+    def _validate_return_column(self, return_column: str | None) -> None:
         if return_column is None:
             return
-        
-        if not isinstance(return_column, str) or not return_column:
-            raise ValueError('return_column must be a non-empty string')
-        
-        if return_column not in self.item_model.model_fields:
-            raise ValueError(f'{self.item_model.__name__} has no field {return_column!r}')
 
-    def _expression_and(self, expressions: List[Any]) -> Any:
+        if not isinstance(return_column, str) or not return_column:
+            raise ValueError("return_column must be a non-empty string")
+
+        if return_column not in self.item_model.model_fields:
+            raise ValueError(f"{self.item_model.__name__} has no field {return_column!r}")
+
+    def _expression_and(self, expressions: list[Any]) -> Any:
         if not expressions:
             return None
         expression = expressions[0]
@@ -155,7 +164,7 @@ class BaseTable(Generic[ItemType]):
 
     def _plan_equality_query(self, field_values: Mapping[str, Any]) -> QueryPlan:
         key_fields: set[str] = set()
-        index_name: Optional[str] = None
+        index_name: str | None = None
         key_condition = None
 
         if self.pk_name in field_values:
@@ -177,7 +186,9 @@ class BaseTable(Generic[ItemType]):
             if field_name in key_fields:
                 continue
             condition = Attr(field_name).eq(value)
-            filter_expression = (condition if filter_expression is None else filter_expression & condition)
+            filter_expression = (
+                condition if filter_expression is None else filter_expression & condition
+            )
 
         return QueryPlan(
             index_name=index_name,
@@ -185,15 +196,18 @@ class BaseTable(Generic[ItemType]):
             filter_expression=filter_expression,
         )
 
-    def get_item(self, key_value: KeyType, **kwargs: Any) -> Optional[ItemType]:
+    def get_item(self, key_value: KeyType, **kwargs: Any) -> ItemType | None:
         kwargs = self._kwargs_with_key_projection(kwargs)
-        item = self.table.get_item(
-            Key=numeric.float_to_decimal(self._key_to_dict(key_value)),
-            **numeric.float_to_decimal(kwargs),
-        ).get('Item') or {}
+        item = (
+            self.table.get_item(
+                Key=numeric.float_to_decimal(self._key_to_dict(key_value)),
+                **numeric.float_to_decimal(kwargs),
+            ).get("Item")
+            or {}
+        )
         return self._from_item(item) if item else None
 
-    def scan_page(self, return_column: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
+    def scan_page(self, return_column: str | None = None, **kwargs: Any) -> dict[str, Any]:
         self._validate_return_column(return_column)
         kwargs = self._kwargs_with_return_column(kwargs, return_column)
 
@@ -201,78 +215,92 @@ class BaseTable(Generic[ItemType]):
             kwargs = self._kwargs_with_key_projection(kwargs)
 
         response = numeric.decimal_to_float(self.table.scan(**numeric.float_to_decimal(kwargs)))
-        raw_items = response.get('Items', [])
+        raw_items = response.get("Items", [])
         if return_column is not None:
             items = [item.get(return_column) for item in raw_items]
         else:
             items = [self._from_item(item) for item in raw_items]
 
-        return {**response, 'Items': items}
+        return {**response, "Items": items}
 
-    def scan_raw(self, return_column: Optional[str] = None, **kwargs: Any) -> List[ItemType] | List[Any]:
+    def scan_raw(
+        self, return_column: str | None = None, **kwargs: Any
+    ) -> list[ItemType] | list[Any]:
         self._validate_return_column(return_column)
-        items: List[Any] = []
-        response = self.scan_page(return_column=return_column, **kwargs,)
-        items.extend(response.get('Items', []))
+        items: list[Any] = []
+        response = self.scan_page(
+            return_column=return_column,
+            **kwargs,
+        )
+        items.extend(response.get("Items", []))
 
-        while 'LastEvaluatedKey' in response:
+        while "LastEvaluatedKey" in response:
             response = self.scan_page(
                 return_column=return_column,
-                ExclusiveStartKey=response['LastEvaluatedKey'],
+                ExclusiveStartKey=response["LastEvaluatedKey"],
                 **kwargs,
             )
-            items.extend(response.get('Items', []))
+            items.extend(response.get("Items", []))
 
         return items
 
-    def query_page(self, return_column: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
+    def query_page(self, return_column: str | None = None, **kwargs: Any) -> dict[str, Any]:
         self._validate_return_column(return_column)
         kwargs = self._kwargs_with_return_column(kwargs, return_column)
         if return_column is None:
             kwargs = self._kwargs_with_key_projection(kwargs)
 
         response = numeric.decimal_to_float(self.table.query(**numeric.float_to_decimal(kwargs)))
-        raw_items = response.get('Items', [])
+        raw_items = response.get("Items", [])
         if return_column is not None:
             items = [item.get(return_column) for item in raw_items]
         else:
             items = [self._from_item(item) for item in raw_items]
 
-        return {**response, 'Items': items}
+        return {**response, "Items": items}
 
-    def query_raw(self, return_column: Optional[str] = None, **kwargs: Any) -> List[ItemType] | List[Any]:
+    def query_raw(
+        self, return_column: str | None = None, **kwargs: Any
+    ) -> list[ItemType] | list[Any]:
         self._validate_return_column(return_column)
-        items: List[Any] = []
+        items: list[Any] = []
         response = self.query_page(return_column=return_column, **kwargs)
-        items.extend(response.get('Items', []))
+        items.extend(response.get("Items", []))
 
-        while 'LastEvaluatedKey' in response:
+        while "LastEvaluatedKey" in response:
             response = self.query_page(
                 return_column=return_column,
-                ExclusiveStartKey=response['LastEvaluatedKey'],
+                ExclusiveStartKey=response["LastEvaluatedKey"],
                 **kwargs,
             )
-            items.extend(response.get('Items', []))
+            items.extend(response.get("Items", []))
 
         return items
 
-    def query_filter(self, return_column: Optional[str] = None, **field_values: Any) -> List[ItemType] | List[Any]:
+    def query_filter(
+        self, return_column: str | None = None, **field_values: Any
+    ) -> list[ItemType] | list[Any]:
         if not field_values:
-            raise ValueError('query_filter() requires at least one field condition')
+            raise ValueError("query_filter() requires at least one field condition")
 
         self._validate_return_column(return_column)
         field_values = numeric.float_to_decimal(dict(field_values))
         self._validate_query_fields(field_values)
         plan = self._plan_equality_query(field_values)
         if plan.key_condition is None:
-            kwargs: Dict[str, Any] = {'FilterExpression': plan.filter_expression,}
-            return self.scan_raw(return_column=return_column, **kwargs,)
+            kwargs: dict[str, Any] = {
+                "FilterExpression": plan.filter_expression,
+            }
+            return self.scan_raw(
+                return_column=return_column,
+                **kwargs,
+            )
 
-        kwargs = {'KeyConditionExpression': plan.key_condition}
+        kwargs = {"KeyConditionExpression": plan.key_condition}
         if plan.index_name:
-            kwargs['IndexName'] = plan.index_name
+            kwargs["IndexName"] = plan.index_name
         if plan.filter_expression is not None:
-            kwargs['FilterExpression'] = plan.filter_expression
+            kwargs["FilterExpression"] = plan.filter_expression
 
         return self.query_raw(return_column=return_column, **kwargs)
 
@@ -300,12 +328,17 @@ class BaseTable(Generic[ItemType]):
                 if generate_pk and attempt < max_attempts:
                     continue
 
-                raise ItemAlreadyExistsError(f'{self.item_model.__name__} with key {item.key_value()!r} already exists') from error
+                raise ItemAlreadyExistsError(
+                    f"{self.item_model.__name__} with key {item.key_value()!r} already exists"
+                ) from error
 
-        # Unreachable, but keeps static type checkers aware that create() cannot implicitly return None.
-        raise RuntimeError('create() exhausted attempts unexpectedly')
-    
-    def _used_expression_attribute_placeholders(self, *expressions: Any) -> tuple[set[str], set[str]]:
+        # Unreachable, but keeps static type checkers aware that create() cannot
+        # implicitly return None.
+        raise RuntimeError("create() exhausted attempts unexpectedly")
+
+    def _used_expression_attribute_placeholders(
+        self, *expressions: Any
+    ) -> tuple[set[str], set[str]]:
         expression_text = " ".join(expr for expr in expressions if isinstance(expr, str))
         names = set()
         values = set()
@@ -317,26 +350,28 @@ class BaseTable(Generic[ItemType]):
                 values.add(stripped)
         return names, values
 
-    def _prune_unused_expression_attributes(self, kwargs: Dict[str, Any]) -> None:
+    def _prune_unused_expression_attributes(self, kwargs: dict[str, Any]) -> None:
         """Drop expression placeholders DynamoDB would reject as unused."""
         used_names, used_values = self._used_expression_attribute_placeholders(
-            kwargs.get('UpdateExpression'),
-            kwargs.get('ConditionExpression'),
-            kwargs.get('ProjectionExpression'),
-            kwargs.get('FilterExpression'),
-            kwargs.get('KeyConditionExpression'),
+            kwargs.get("UpdateExpression"),
+            kwargs.get("ConditionExpression"),
+            kwargs.get("ProjectionExpression"),
+            kwargs.get("FilterExpression"),
+            kwargs.get("KeyConditionExpression"),
         )
-        names = kwargs.get('ExpressionAttributeNames')
+        names = kwargs.get("ExpressionAttributeNames")
         if names and used_names:
-            kwargs['ExpressionAttributeNames'] = {k: v for k, v in names.items() if k in used_names}
+            kwargs["ExpressionAttributeNames"] = {k: v for k, v in names.items() if k in used_names}
         elif names == {}:
-            kwargs.pop('ExpressionAttributeNames', None)
+            kwargs.pop("ExpressionAttributeNames", None)
 
-        values = kwargs.get('ExpressionAttributeValues')
+        values = kwargs.get("ExpressionAttributeValues")
         if values and used_values:
-            kwargs['ExpressionAttributeValues'] = {k: v for k, v in values.items() if k in used_values}
+            kwargs["ExpressionAttributeValues"] = {
+                k: v for k, v in values.items() if k in used_values
+            }
         elif values == {}:
-            kwargs.pop('ExpressionAttributeValues', None)
+            kwargs.pop("ExpressionAttributeValues", None)
 
     def _key_error_description(self, key: Mapping[str, Any]) -> str:
         return ", ".join(f"{field_name}={key.get(field_name)!r}" for field_name in self.key_fields)
@@ -349,78 +384,77 @@ class BaseTable(Generic[ItemType]):
     def _projected_attribute_names(
         self,
         projection_expression: str,
-        expression_names: Optional[Mapping[str, str]],
+        expression_names: Mapping[str, str] | None,
     ) -> set[str]:
         names = expression_names or {}
         projected: set[str] = set()
-        for part in projection_expression.split(','):
+        for part in projection_expression.split(","):
             token = part.strip()
             if not token:
                 continue
             # Dynamo projections may use aliases (``#name``) and may also select
             # nested paths.  For model construction we only care whether the
             # top-level key attributes are included.
-            top_level = token.split('.', 1)[0].split('[', 1)[0].strip()
+            top_level = token.split(".", 1)[0].split("[", 1)[0].strip()
             projected.add(names.get(top_level, top_level))
         return projected
 
-    def _kwargs_with_key_projection(self, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
-        projection_expression = kwargs.get('ProjectionExpression')
+    def _kwargs_with_key_projection(self, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+        projection_expression = kwargs.get("ProjectionExpression")
         if not projection_expression or not isinstance(projection_expression, str):
             return dict(kwargs)
 
         projected = self._projected_attribute_names(
             projection_expression,
-            kwargs.get('ExpressionAttributeNames'),
+            kwargs.get("ExpressionAttributeNames"),
         )
-        missing_key_fields = [field_name for field_name in self.key_fields if field_name not in projected]
+        missing_key_fields = [
+            field_name for field_name in self.key_fields if field_name not in projected
+        ]
         if not missing_key_fields:
             return dict(kwargs)
 
         return {
             **dict(kwargs),
-            'ProjectionExpression': ', '.join([projection_expression, *missing_key_fields]),
+            "ProjectionExpression": ", ".join([projection_expression, *missing_key_fields]),
         }
-    
+
     def _kwargs_with_return_column(
         self,
         kwargs: Mapping[str, Any],
-        return_column: Optional[str],
-    ) -> Dict[str, Any]:
+        return_column: str | None,
+    ) -> dict[str, Any]:
         kwargs = dict(kwargs)
         if return_column is None:
             return kwargs
 
-        if 'ProjectionExpression' in kwargs:
-            raise ValueError('ProjectionExpression cannot be supplied when return_column is set')
+        if "ProjectionExpression" in kwargs:
+            raise ValueError("ProjectionExpression cannot be supplied when return_column is set")
 
-        expression_names = dict(kwargs.get('ExpressionAttributeNames') or {})
-        placeholder = '#return_column'
-        while (
-            placeholder in expression_names
-            and expression_names[placeholder] != return_column
-        ): 
-            placeholder += '_'
+        expression_names = dict(kwargs.get("ExpressionAttributeNames") or {})
+        placeholder = "#return_column"
+        while placeholder in expression_names and expression_names[placeholder] != return_column:
+            placeholder += "_"
 
         expression_names[placeholder] = return_column
-        kwargs['ProjectionExpression'] = placeholder
-        kwargs['ExpressionAttributeNames'] = expression_names
+        kwargs["ProjectionExpression"] = placeholder
+        kwargs["ExpressionAttributeNames"] = expression_names
         return kwargs
 
-    def _existing_item_condition(self) -> tuple[str, Dict[str, str]]:
+    def _existing_item_condition(self) -> tuple[str, dict[str, str]]:
         expression_names = {
-            f'#k{index}': field_name
-            for index, field_name in enumerate(self.key_fields)
+            f"#k{index}": field_name for index, field_name in enumerate(self.key_fields)
         }
-        condition = ' AND '.join(
-            f'attribute_exists(#k{index})'
-            for index in range(len(self.key_fields))
+        condition = " AND ".join(
+            f"attribute_exists(#k{index})" for index in range(len(self.key_fields))
         )
         return condition, expression_names
 
-    def _validate_update_mapping(self, fields: Mapping[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    def _validate_update_mapping(
+        self, fields: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         if not fields:
-            raise ValueError('update() requires a non-empty item or field mapping')
+            raise ValueError("update() requires a non-empty item or field mapping")
 
         missing_keys = [field_name for field_name in self.key_fields if field_name not in fields]
         if missing_keys:
@@ -431,11 +465,12 @@ class BaseTable(Generic[ItemType]):
         empty_keys = [
             field_name
             for field_name in self.key_fields
-            if fields.get(field_name) is None or fields.get(field_name) == ''
+            if fields.get(field_name) is None or fields.get(field_name) == ""
         ]
         if empty_keys:
             raise ValueError(
-                f"update() key field(s) cannot be null or empty for {self.item_model.__name__}: {empty_keys!r}"
+                f"update() key field(s) cannot be null or empty for "
+                f"{self.item_model.__name__}: {empty_keys!r}"
             )
 
         key = {field_name: fields[field_name] for field_name in self.key_fields}
@@ -445,19 +480,21 @@ class BaseTable(Generic[ItemType]):
             if field_name not in self.key_fields
         }
         if not updates:
-            raise ValueError('update() requires at least one non-key field to update')
+            raise ValueError("update() requires at least one non-key field to update")
         return key, updates
 
-    def _update_expression_from_fields(self, fields: Mapping[str, Any]) -> tuple[str, Dict[str, str], Dict[str, Any]]:
-        expression_names: Dict[str, str] = {}
-        expression_values: Dict[str, Any] = {}
-        assignments: List[str] = []
+    def _update_expression_from_fields(
+        self, fields: Mapping[str, Any]
+    ) -> tuple[str, dict[str, str], dict[str, Any]]:
+        expression_names: dict[str, str] = {}
+        expression_values: dict[str, Any] = {}
+        assignments: list[str] = []
         for index, (field_name, value) in enumerate(fields.items()):
-            name_key = f'#u{index}'
-            value_key = f':u{index}'
+            name_key = f"#u{index}"
+            value_key = f":u{index}"
             expression_names[name_key] = field_name
             expression_values[value_key] = value
-            assignments.append(f'{name_key} = {value_key}')
+            assignments.append(f"{name_key} = {value_key}")
         return f"SET {', '.join(assignments)}", expression_names, expression_values
 
     def _replace_existing(self, item: ItemType) -> ItemType:
@@ -474,7 +511,8 @@ class BaseTable(Generic[ItemType]):
             if self._condition_failed(error):
                 key = self._key_to_dict(item.key_value())
                 raise ItemDoesNotExistError(
-                    f'{self.item_model.__name__} with key {self._key_error_description(key)} does not exist'
+                    f"{self.item_model.__name__} with key "
+                    f"{self._key_error_description(key)} does not exist"
                 ) from error
             raise
 
@@ -483,10 +521,10 @@ class BaseTable(Generic[ItemType]):
         item_or_fields: ItemType | Mapping[str, Any],
         *,
         condition_expression: Any = None,
-        condition_names: Optional[Mapping[str, str]] = None,
-        condition_values: Optional[Mapping[str, Any]] = None,
-        return_values: str = 'ALL_NEW',
-    ) -> Optional[ItemType]:
+        condition_names: Mapping[str, str] | None = None,
+        condition_values: Mapping[str, Any] | None = None,
+        return_values: str = "ALL_NEW",
+    ) -> ItemType | None:
         """Update an existing item.
 
         Pass a model instance to replace the full existing item, including null
@@ -499,11 +537,14 @@ class BaseTable(Generic[ItemType]):
             return self._replace_existing(item_or_fields)
         if not isinstance(item_or_fields, Mapping):
             raise TypeError(
-                f'update() expects {self.item_model.__name__} or a mapping with key fields {self.key_fields!r}'
+                f"update() expects {self.item_model.__name__} or a mapping with "
+                f"key fields {self.key_fields!r}"
             )
 
         key, updates = self._validate_update_mapping(item_or_fields)
-        update_expression, update_names, update_values = self._update_expression_from_fields(updates)
+        update_expression, update_names, update_values = self._update_expression_from_fields(
+            updates
+        )
 
         expression_names = {**dict(condition_names or {}), **update_names}
         expression_values = {**dict(condition_values or {}), **update_values}
@@ -512,16 +553,16 @@ class BaseTable(Generic[ItemType]):
         if default_condition_expression:
             condition_expression = exists_condition
         else:
-            condition_expression = f'({exists_condition}) AND ({condition_expression})'
+            condition_expression = f"({exists_condition}) AND ({condition_expression})"
         expression_names = {**key_condition_names, **expression_names}
 
-        kwargs: Dict[str, Any] = {
-            'Key': numeric.float_to_decimal(key),
-            'UpdateExpression': update_expression,
-            'ConditionExpression': condition_expression,
-            'ExpressionAttributeNames': expression_names,
-            'ExpressionAttributeValues': numeric.float_to_decimal(expression_values),
-            'ReturnValues': return_values,
+        kwargs: dict[str, Any] = {
+            "Key": numeric.float_to_decimal(key),
+            "UpdateExpression": update_expression,
+            "ConditionExpression": condition_expression,
+            "ExpressionAttributeNames": expression_names,
+            "ExpressionAttributeValues": numeric.float_to_decimal(expression_values),
+            "ReturnValues": return_values,
         }
         self._prune_unused_expression_attributes(kwargs)
 
@@ -532,16 +573,17 @@ class BaseTable(Generic[ItemType]):
                 item_missing = self.get_item(self._key_value_from_dict(key)) is None
                 if default_condition_expression or item_missing:
                     raise ItemDoesNotExistError(
-                        f'{self.item_model.__name__} with key {self._key_error_description(key)} does not exist'
+                        f"{self.item_model.__name__} with key "
+                        f"{self._key_error_description(key)} does not exist"
                     ) from error
             raise
-        attributes = response.get('Attributes') or {}
+        attributes = response.get("Attributes") or {}
         return self._from_item(attributes) if attributes else None
 
     def delete(self, key_value: KeyType) -> None:
         self.table.delete_item(Key=numeric.float_to_decimal(self._key_to_dict(key_value)))
 
-    def expected_schema(self) -> Dict[str, Any]:
+    def expected_schema(self) -> dict[str, Any]:
         item_model = self.item_model
         key_schema = {
             "partition_key": item_model.partition_key,
@@ -571,8 +613,7 @@ class BaseTable(Generic[ItemType]):
                 ),
             }
         attribute_types = {
-            attr_name: "S"
-            for attr_name in self._schema_key_attribute_names(key_schema, gsis)
+            attr_name: "S" for attr_name in self._schema_key_attribute_names(key_schema, gsis)
         }
         explicit_attribute_types = getattr(item_model, "attribute_types", {})
         attribute_types.update(explicit_attribute_types)
@@ -584,7 +625,7 @@ class BaseTable(Generic[ItemType]):
             "attribute_types": attribute_types,
         }
 
-    def actual_schema(self) -> Dict[str, Any]:
+    def actual_schema(self) -> dict[str, Any]:
         response = self.table.meta.client.describe_table(TableName=self.table_name)
         table = response["Table"]
         key_schema = self._parse_key_schema(table.get("KeySchema", []))
@@ -609,7 +650,7 @@ class BaseTable(Generic[ItemType]):
             "attribute_types": attribute_types,
         }
 
-    def schema_diff(self) -> "SchemaDiff":
+    def schema_diff(self) -> SchemaDiff:
         """Classified differences between this table's declaration and the live one.
 
         Delegates to rc_lambda_base.dynamo.schema_diff, which is also what
@@ -628,8 +669,8 @@ class BaseTable(Generic[ItemType]):
                 return False
             raise
 
-    def _parse_key_schema(self, key_schema: List[Dict[str, str]]) -> Dict[str, Optional[str]]:
-        parsed: Dict[str, Optional[str]] = {
+    def _parse_key_schema(self, key_schema: list[dict[str, str]]) -> dict[str, str | None]:
+        parsed: dict[str, str | None] = {
             "partition_key": None,
             "sort_key": None,
         }
@@ -640,7 +681,7 @@ class BaseTable(Generic[ItemType]):
                 parsed["sort_key"] = key["AttributeName"]
         return parsed
 
-    def _parse_projection(self, projection: Dict[str, Any]) -> Dict[str, Any]:
+    def _parse_projection(self, projection: dict[str, Any]) -> dict[str, Any]:
         non_key_attributes = projection.get("NonKeyAttributes")
         return {
             "projection": projection.get("ProjectionType"),
@@ -650,18 +691,18 @@ class BaseTable(Generic[ItemType]):
 
     def _schema_key_attribute_names(
         self,
-        key_schema: Dict[str, Optional[str]],
-        gsis: Dict[str, Dict[str, Any]],
+        key_schema: dict[str, str | None],
+        gsis: dict[str, dict[str, Any]],
     ) -> set[str]:
-        attrs = set()
-        if key_schema.get("partition_key"):
-            attrs.add(key_schema["partition_key"])
-        if key_schema.get("sort_key"):
-            attrs.add(key_schema["sort_key"])
+        attrs: set[str] = set()
+        for field in ("partition_key", "sort_key"):
+            name = key_schema.get(field)
+            if name:
+                attrs.add(name)
         for gsi in gsis.values():
-            if gsi.get("partition_key"):
-                attrs.add(gsi["partition_key"])
-            if gsi.get("sort_key"):
-                attrs.add(gsi["sort_key"])
+            for field in ("partition_key", "sort_key"):
+                name = gsi.get(field)
+                if name:
+                    attrs.add(name)
 
         return attrs

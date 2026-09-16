@@ -10,7 +10,7 @@ account_id: "273268178059"
 region: us-east-1
 
 # Non-secret Cognito identifiers. The pools themselves are managed outside this
-# repository (see infrastructure/identity/README.md).
+# repository (see infra/identity.md).
 identity_profiles:
   prod:
     user_pool_id: us-east-1_1GIFBpLKf

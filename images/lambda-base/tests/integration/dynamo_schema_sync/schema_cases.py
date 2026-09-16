@@ -3,15 +3,17 @@
 All table names are namespaced by ``DYNAMO_SCHEMA_TEST_PREFIX`` + a per-run id so
 concurrent/interrupted runs never collide and cleanup can target one prefix.
 
-rc-dynamo-sync imports this module via ``--schema-module`` /
-``DYNAMO_SCHEMA_MODULE`` and selects tables by their key in ``TABLES``
+The migration script imports this module via ``--schema-module`` /
+``DYNAMO_SCHEMA_MODULE`` and selects tables by their module-level attribute name
 (e.g. ``--tables create_simple_table``). Tests set up a *live* table with a
 possibly-different schema, then run the script and assert the reconciliation.
 """
+
 from __future__ import annotations
 
 import os
-from typing import Any, ClassVar, Dict, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 from pydantic import ConfigDict
 
@@ -32,8 +34,8 @@ def table_name(case: str) -> str:
 class SimpleItem(BaseItem):
     partition_key: ClassVar[str] = "pk"
     pk: str
-    payload: Optional[str] = None
-    count: Optional[int] = None
+    payload: str | None = None
+    count: int | None = None
 
 
 class CompositeItem(BaseItem):
@@ -41,24 +43,24 @@ class CompositeItem(BaseItem):
     sort_key: ClassVar[str] = "sk"
     pk: str
     sk: str
-    payload: Optional[str] = None
+    payload: str | None = None
 
 
 class MultiGsiItem(BaseItem):
     partition_key: ClassVar[str] = "pk"
     gsis: ClassVar[Mapping[str, str]] = {"gsi_a": "GSI-A", "gsi_b": "GSI-B"}
     pk: str
-    gsi_a: Optional[str] = None
-    gsi_b: Optional[str] = None
-    payload: Optional[str] = None
+    gsi_a: str | None = None
+    gsi_b: str | None = None
+    payload: str | None = None
 
 
 class OneGsiItem(BaseItem):
     partition_key: ClassVar[str] = "pk"
     gsis: ClassVar[Mapping[str, str]] = {"gsi_a": "GSI-A"}
     pk: str
-    gsi_a: Optional[str] = None
-    payload: Optional[str] = None
+    gsi_a: str | None = None
+    payload: str | None = None
 
 
 class Gsi1Item(BaseItem):
@@ -68,9 +70,9 @@ class Gsi1Item(BaseItem):
     partition_key: ClassVar[str] = "pk"
     gsis: ClassVar[Mapping[str, str]] = {"gsi_pk": "GSI1-Test"}
     pk: str
-    gsi_pk: Optional[str] = None
-    gsi_sk: Optional[str] = None
-    payload: Optional[str] = None
+    gsi_pk: str | None = None
+    gsi_sk: str | None = None
+    payload: str | None = None
 
 
 class StrictRestoreItem(BaseItem):
@@ -85,14 +87,14 @@ class StrictRestoreItem(BaseItem):
 
     partition_key: ClassVar[str] = "pk"
     pk: str
-    count: Optional[int] = None
+    count: int | None = None
 
 
 class PermissiveRestoreItem(BaseItem):
     model_config = ConfigDict(extra="allow")
     partition_key: ClassVar[str] = "pk"
     pk: str
-    ratio: Optional[float] = None
+    ratio: float | None = None
 
 
 # ─────────────────────────── table instances ───────────────────────────
@@ -160,12 +162,12 @@ class ChangedGsiSkTable(BaseTable[Gsi1Item]):
     table_name = table_name("changed_gsi_sk")
     item_model = Gsi1Item
 
-    def expected_schema(self) -> Dict[str, Any]:
+    def expected_schema(self) -> dict[str, Any]:
         schema = super().expected_schema()
         schema["gsis"]["GSI1-Test"] = {
             "partition_key": "gsi_pk",
             "sort_key": "gsi_sk",
-            "projection": None,          # unmodeled -> inherited from live
+            "projection": None,  # unmodeled -> inherited from live
             "non_key_attributes": None,
         }
         schema["attribute_types"].update({"gsi_pk": "S", "gsi_sk": "S"})
@@ -180,8 +182,8 @@ class KeysOnlyProjectionItem(BaseItem):
         "GSI1-Test": {"partition_key": "gsi_pk", "projection": "KEYS_ONLY"},
     }
     pk: str
-    gsi_pk: Optional[str] = None
-    payload: Optional[str] = None
+    gsi_pk: str | None = None
+    payload: str | None = None
 
 
 class IncludeProjectionItem(BaseItem):
@@ -194,8 +196,8 @@ class IncludeProjectionItem(BaseItem):
         },
     }
     pk: str
-    gsi_pk: Optional[str] = None
-    payload: Optional[str] = None
+    gsi_pk: str | None = None
+    payload: str | None = None
 
 
 class DeclaredKeysOnlyGsiTable(BaseTable[KeysOnlyProjectionItem]):
@@ -225,8 +227,8 @@ class CompositeGsiItem(BaseItem):
     gsis: ClassVar[Mapping[str, str]] = {"gsi_pk": "GSI1-Test"}
     pk: str
     sk: str
-    gsi_pk: Optional[str] = None
-    payload: Optional[str] = None
+    gsi_pk: str | None = None
+    payload: str | None = None
 
 
 class InheritProjectionOnRecreateTable(BaseTable[CompositeGsiItem]):
@@ -301,7 +303,7 @@ class BatchRestoreTable(BaseTable[PermissiveRestoreItem]):
     insert_unknown_columns_on_recreate = True
 
 
-# Module-level instances, registered in TABLES below.
+# Module-level instances selected by name via --tables.
 create_simple_table = CreateSimpleTable()
 create_composite_table = CreateCompositeTable()
 create_gsi_table = CreateGsiTable()
@@ -331,28 +333,8 @@ permissive_restore_table = PermissiveRestoreTable()
 batch_restore_table = BatchRestoreTable()
 
 
-# The registry rc-dynamo-sync reads. Keys are what --tables selects.
-TABLES = {
-    "create_simple_table": create_simple_table,
-    "create_composite_table": create_composite_table,
-    "create_gsi_table": create_gsi_table,
-    "missing_gsi_table": missing_gsi_table,
-    "remote_only_gsi_table": remote_only_gsi_table,
-    "reconcile_gsi_table": reconcile_gsi_table,
-    "ignore_composite_remote_gsi_table": ignore_composite_remote_gsi_table,
-    "changed_gsi_pk_table": changed_gsi_pk_table,
-    "changed_gsi_sk_table": changed_gsi_sk_table,
-    "reconcile_all_gsi_table": reconcile_all_gsi_table,
-    "declared_keys_only_gsi_table": declared_keys_only_gsi_table,
-    "declared_include_gsi_table": declared_include_gsi_table,
-    "inherit_projection_on_rebuild_table": inherit_projection_on_rebuild_table,
-    "inherit_projection_on_recreate_table": inherit_projection_on_recreate_table,
-    "preserve_undeclared_on_recreate_table": preserve_undeclared_on_recreate_table,
-    "recreate_pk_changed_table": recreate_pk_changed_table,
-    "recreate_sk_added_table": recreate_sk_added_table,
-    "recreate_sk_removed_table": recreate_sk_removed_table,
-    "recreate_sk_name_changed_table": recreate_sk_name_changed_table,
-    "strict_restore_table": strict_restore_table,
-    "permissive_restore_table": permissive_restore_table,
-    "batch_restore_table": batch_restore_table,
+# The registry rc-dynamo-sync loads: selection name -> table. Keys match the
+# module-level names above, so --tables <name> selects one case.
+TABLES: Mapping[str, BaseTable[Any]] = {
+    name: value for name, value in sorted(globals().items()) if isinstance(value, BaseTable)
 }

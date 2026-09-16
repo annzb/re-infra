@@ -5,12 +5,14 @@ tests need to construct *old*/live schemas that do not always match any declared
 model — e.g. a table whose primary key or GSI key schema differs from what the
 migration script expects.
 """
+
 from __future__ import annotations
 
 import os
 import time
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
@@ -23,7 +25,7 @@ def _region() -> str:
     return os.environ.get("AWS_REGION", "us-east-1")
 
 
-def _endpoint() -> Optional[str]:
+def _endpoint() -> str | None:
     return os.environ.get("AWS_ENDPOINT_URL")
 
 
@@ -42,7 +44,7 @@ def s3_client() -> Any:
 # ─────────────────────────── schema construction ───────────────────────────
 
 
-def _key_schema_to_boto(key_schema: Mapping[str, Optional[str]]) -> List[Dict[str, str]]:
+def _key_schema_to_boto(key_schema: Mapping[str, str | None]) -> list[dict[str, str]]:
     boto = [{"AttributeName": key_schema["partition_key"], "KeyType": "HASH"}]
     if key_schema.get("sort_key"):
         boto.append({"AttributeName": key_schema["sort_key"], "KeyType": "RANGE"})
@@ -50,13 +52,13 @@ def _key_schema_to_boto(key_schema: Mapping[str, Optional[str]]) -> List[Dict[st
 
 
 def _collect_attribute_definitions(
-    key_schema: Mapping[str, Optional[str]],
-    gsis: Optional[Mapping[str, Mapping[str, Optional[str]]]],
-    attribute_types: Optional[Mapping[str, str]],
-) -> List[Dict[str, str]]:
-    attrs: Dict[str, str] = {}
+    key_schema: Mapping[str, str | None],
+    gsis: Mapping[str, Mapping[str, str | None]] | None,
+    attribute_types: Mapping[str, str] | None,
+) -> list[dict[str, str]]:
+    attrs: dict[str, str] = {}
 
-    def add(ks: Mapping[str, Optional[str]]) -> None:
+    def add(ks: Mapping[str, str | None]) -> None:
         for role in ("partition_key", "sort_key"):
             name = ks.get(role)
             if name:
@@ -74,9 +76,9 @@ def _collect_attribute_definitions(
     ]
 
 
-def _projection_to_boto(gsi: Mapping[str, Any]) -> Dict[str, Any]:
+def _projection_to_boto(gsi: Mapping[str, Any]) -> dict[str, Any]:
     """Build a Projection block. Defaults to ALL when the case does not care."""
-    projection: Dict[str, Any] = {"ProjectionType": gsi.get("projection") or "ALL"}
+    projection: dict[str, Any] = {"ProjectionType": gsi.get("projection") or "ALL"}
     if projection["ProjectionType"] == "INCLUDE":
         projection["NonKeyAttributes"] = sorted(gsi["non_key_attributes"])
     return projection
@@ -84,13 +86,13 @@ def _projection_to_boto(gsi: Mapping[str, Any]) -> Dict[str, Any]:
 
 def create_live_table(
     table_name: str,
-    key_schema: Mapping[str, Optional[str]],
-    gsis: Optional[Mapping[str, Mapping[str, Any]]] = None,
-    attribute_types: Optional[Mapping[str, str]] = None,
+    key_schema: Mapping[str, str | None],
+    gsis: Mapping[str, Mapping[str, Any]] | None = None,
+    attribute_types: Mapping[str, str] | None = None,
 ) -> None:
     """Create a table with an arbitrary (possibly non-model) key/GSI schema."""
     client = dynamo_client()
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "TableName": table_name,
         "BillingMode": "PAY_PER_REQUEST",
         "AttributeDefinitions": _collect_attribute_definitions(key_schema, gsis, attribute_types),
@@ -153,14 +155,14 @@ def delete_table(table_name: str) -> None:
     wait_table_deleted(table_name)
 
 
-def delete_tables_by_prefix(prefix: str) -> List[str]:
+def delete_tables_by_prefix(prefix: str) -> list[str]:
     client = dynamo_client()
-    names: List[str] = []
+    names: list[str] = []
     paginator = client.get_paginator("list_tables")
     for page in paginator.paginate():
         names.extend(page.get("TableNames", []))
 
-    deleted: List[str] = []
+    deleted: list[str] = []
     for name in names:
         if name.startswith(prefix):
             delete_table(name)
@@ -190,10 +192,10 @@ def put_items(table_name: str, items: Sequence[Mapping[str, Any]]) -> None:
             batch.put_item(Item=_to_decimal(dict(item)))
 
 
-def scan_items(table_name: str) -> List[Dict[str, Any]]:
+def scan_items(table_name: str) -> list[dict[str, Any]]:
     table = dynamo_resource().Table(table_name)
-    items: List[Dict[str, Any]] = []
-    kwargs: Dict[str, Any] = {}
+    items: list[dict[str, Any]] = []
+    kwargs: dict[str, Any] = {}
     while True:
         response = table.scan(**kwargs)
         items.extend(response.get("Items", []))
@@ -206,9 +208,9 @@ def scan_items(table_name: str) -> List[Dict[str, Any]]:
 # ─────────────────────────── introspection ───────────────────────────
 
 
-def _parse_key_schema(boto_key_schema: Sequence[Mapping[str, str]]) -> Dict[str, Optional[str]]:
-    partition_key: Optional[str] = None
-    sort_key: Optional[str] = None
+def _parse_key_schema(boto_key_schema: Sequence[Mapping[str, str]]) -> dict[str, str | None]:
+    partition_key: str | None = None
+    sort_key: str | None = None
     for element in boto_key_schema:
         if element["KeyType"] == "HASH":
             partition_key = element["AttributeName"]
@@ -217,7 +219,7 @@ def _parse_key_schema(boto_key_schema: Sequence[Mapping[str, str]]) -> Dict[str,
     return {"partition_key": partition_key, "sort_key": sort_key}
 
 
-def describe_schema(table_name: str) -> Dict[str, Any]:
+def describe_schema(table_name: str) -> dict[str, Any]:
     """Return {key_schema, gsis} normalized like BaseTable.actual_schema()."""
     client = dynamo_client()
     table = client.describe_table(TableName=table_name)["Table"]
@@ -230,7 +232,7 @@ def describe_schema(table_name: str) -> Dict[str, Any]:
     }
 
 
-def describe_projections(table_name: str) -> Dict[str, Any]:
+def describe_projections(table_name: str) -> dict[str, Any]:
     """Live projection per index, as (type, sorted non-key attributes or None)."""
     client = dynamo_client()
     table = client.describe_table(TableName=table_name)["Table"]
@@ -254,7 +256,7 @@ def ensure_bucket(bucket: str) -> None:
     except ClientError:
         pass
 
-    params: Dict[str, Any] = {"Bucket": bucket}
+    params: dict[str, Any] = {"Bucket": bucket}
     region = _region()
     if region != "us-east-1":
         params["CreateBucketConfiguration"] = {"LocationConstraint": region}
@@ -270,10 +272,10 @@ def bucket_exists(bucket: str) -> bool:
         return False
 
 
-def list_dump_objects(bucket: str, table_name: Optional[str] = None) -> List[str]:
+def list_dump_objects(bucket: str, table_name: str | None = None) -> list[str]:
     client = s3_client()
     prefix = f"dynamo-schema-sync/{table_name}/" if table_name else "dynamo-schema-sync/"
-    keys: List[str] = []
+    keys: list[str] = []
     try:
         paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -287,7 +289,7 @@ def delete_bucket_objects(bucket: str, prefix: str = "dynamo-schema-sync/") -> N
     client = s3_client()
     try:
         paginator = client.get_paginator("list_objects_v2")
-        to_delete: List[Dict[str, str]] = []
+        to_delete: list[dict[str, str]] = []
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             to_delete.extend({"Key": obj["Key"]} for obj in page.get("Contents", []))
     except client.exceptions.NoSuchBucket:
@@ -306,18 +308,35 @@ def delete_bucket(bucket: str) -> None:
         pass
 
 
-# ─────────────────────────── tags ───────────────────────────
+# ─────────────────────────────── tags ───────────────────────────────
 
 
-def list_tags(table_name: str) -> Dict[str, str]:
+def table_arn(table_name: str) -> str:
+    return dynamo_client().describe_table(TableName=table_name)["Table"]["TableArn"]
+
+
+def table_tags(table_name: str) -> dict[str, str]:
     client = dynamo_client()
-    arn = client.describe_table(TableName=table_name)["Table"]["TableArn"]
-    tags: Dict[str, str] = {}
-    kwargs: Dict[str, Any] = {"ResourceArn": arn}
+    arn = table_arn(table_name)
+    tags: dict[str, str] = {}
+    token: str | None = None
     while True:
+        kwargs: dict[str, Any] = {"ResourceArn": arn}
+        if token:
+            kwargs["NextToken"] = token
         response = client.list_tags_of_resource(**kwargs)
         tags.update({tag["Key"]: tag["Value"] for tag in response.get("Tags", [])})
         token = response.get("NextToken")
         if not token:
             return tags
-        kwargs["NextToken"] = token
+
+
+def tag_table(table_name: str, tags: Mapping[str, str]) -> None:
+    dynamo_client().tag_resource(
+        ResourceArn=table_arn(table_name),
+        Tags=[{"Key": key, "Value": value} for key, value in tags.items()],
+    )
+
+
+def untag_table(table_name: str, keys: Sequence[str]) -> None:
+    dynamo_client().untag_resource(ResourceArn=table_arn(table_name), TagKeys=list(keys))

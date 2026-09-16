@@ -12,8 +12,8 @@ import yaml
 
 from rc_infra.catalog import BUCKET_LOGICAL_IDS, Environment
 
-PLATFORM_TEMPLATE_PATH = Path("infrastructure/platform/template.yaml")
-ENVIRONMENT_TEMPLATE_PATH = Path("infrastructure/environment/template.yaml")
+PLATFORM_TEMPLATE_PATH = Path("infra/platform.yaml")
+ENVIRONMENT_TEMPLATE_PATH = Path("infra/environment.yaml")
 
 MANAGED_BY_TAG = "ManagedBy"
 MANAGED_BY_VALUE = "re-infra"

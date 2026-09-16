@@ -12,10 +12,11 @@ This fake evaluates those condition objects via ``.get_expression()`` so tests
 exercise the real serialization/query-planning code without moto or AWS
 credentials (matching the repo's fake-table convention).
 """
+
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from boto3.dynamodb.conditions import AttributeBase, ConditionBase
 from botocore.exceptions import ClientError
@@ -25,7 +26,7 @@ def _attr_name(value: Any) -> Any:
     return value.name if isinstance(value, AttributeBase) else value
 
 
-def _matches(item: Dict[str, Any], condition: Optional[ConditionBase]) -> bool:
+def _matches(item: dict[str, Any], condition: ConditionBase | None) -> bool:
     """Evaluate a boto3 Key/Attr ConditionBase against a stored item."""
     if condition is None:
         return True
@@ -64,21 +65,21 @@ class ConditionalCheckFailed(ClientError):
 class FakeDynamoTable:
     """In-memory stand-in for a boto3 ``Table`` handle."""
 
-    def __init__(self, key_fields: Tuple[str, Optional[str]], gsis=None):
+    def __init__(self, key_fields: tuple[str, str | None], gsis=None):
         # key_fields: (hash_attr, range_attr|None) for the base table.
         self.name = "FakeTable"
         self.key_fields = key_fields
         self.gsis = gsis or {}
-        self.items: List[Dict[str, Any]] = []
-        self.put_calls: List[Dict[str, Any]] = []
-        self.update_calls: List[Dict[str, Any]] = []
+        self.items: list[dict[str, Any]] = []
+        self.put_calls: list[dict[str, Any]] = []
+        self.update_calls: list[dict[str, Any]] = []
 
     # ── key helpers ──
-    def _key_of(self, item: Dict[str, Any]) -> Tuple[Any, Any]:
+    def _key_of(self, item: dict[str, Any]) -> tuple[Any, Any]:
         hk, rk = self.key_fields
         return item.get(hk), (item.get(rk) if rk else None)
 
-    def _find(self, key: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _find(self, key: dict[str, Any]) -> dict[str, Any] | None:
         hk, rk = self.key_fields
         for it in self.items:
             if it.get(hk) == key.get(hk) and (rk is None or it.get(rk) == key.get(rk)):
@@ -101,7 +102,6 @@ class FakeDynamoTable:
         if existing is not None:
             self.items.remove(existing)
         self.items.append(dict(Item))
-
 
     def update_item(
         self,
@@ -157,13 +157,13 @@ class FakeDynamoTable:
             self.items.remove(existing)
 
     # ── reads ──
-    def _project(self, item: Dict[str, Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    def _project(self, item: dict[str, Any], kwargs: dict[str, Any]) -> dict[str, Any]:
         projection = kwargs.get("ProjectionExpression")
         if not projection:
             return dict(item)
 
         names = kwargs.get("ExpressionAttributeNames") or {}
-        projected: Dict[str, Any] = {}
+        projected: dict[str, Any] = {}
         for part in projection.split(","):
             token = part.strip()
             if not token:
@@ -189,5 +189,7 @@ class FakeDynamoTable:
 
     def scan(self, **kwargs):
         filter_expression = kwargs.get("FilterExpression")
-        results = [self._project(it, kwargs) for it in self.items if _matches(it, filter_expression)]
+        results = [
+            self._project(it, kwargs) for it in self.items if _matches(it, filter_expression)
+        ]
         return {"Items": results}

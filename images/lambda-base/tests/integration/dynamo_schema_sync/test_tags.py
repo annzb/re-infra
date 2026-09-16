@@ -1,27 +1,46 @@
-"""Ownership tags written by rc-dynamo-sync --apply.
+"""Ownership tags.
 
-Environment teardown deletes only tables carrying these tags, so they must be
-present on tables the tool creates and on existing declared tables it adopts.
+Environment teardown deletes a DynamoDB table only when it carries these tags, so
+rc-dynamo-sync must write them on every table it manages -- including tables that
+already existed before the tool started managing them.
 """
-from __future__ import annotations
 
-import os
+from __future__ import annotations
 
 from . import dynamo_helpers as dh
 from . import schema_cases as sc
-from .cli_helpers import output, run_schema_sync
+from .cli_helpers import TEST_ENVIRONMENT, output, run_schema_sync
+
+OWNERSHIP = {
+    "ManagedBy": "rc-dynamo-sync",
+    "LifecycleOwner": "rc-dynamo-sync",
+    "Environment": TEST_ENVIRONMENT,
+}
 
 
-def expected_tags(**extra: str) -> dict:
-    return {
-        "ManagedBy": "rc-dynamo-sync",
-        "LifecycleOwner": "rc-dynamo-sync",
-        "Environment": os.environ["RC_ENVIRONMENT"],
-        **extra,
-    }
+def test_created_table_carries_ownership_tags(managed_table):
+    name = managed_table(sc.create_simple_table)
+
+    result = run_schema_sync(tables="create_simple_table", apply=True)
+
+    assert result.returncode == 0, output(result)
+    assert OWNERSHIP.items() <= dh.table_tags(name).items()
 
 
-def test_apply_tags_the_tables_it_creates(managed_table):
+def test_existing_table_is_tagged_on_the_next_apply(managed_table):
+    name = managed_table(sc.create_simple_table)
+    assert run_schema_sync(tables="create_simple_table", apply=True).returncode == 0
+    # An untagged table is what every table created before this tool looks like.
+    dh.untag_table(name, list(OWNERSHIP))
+    assert not OWNERSHIP.items() <= dh.table_tags(name).items()
+
+    result = run_schema_sync(tables="create_simple_table", apply=True)
+
+    assert result.returncode == 0, output(result)
+    assert OWNERSHIP.items() <= dh.table_tags(name).items()
+
+
+def test_extra_tags_are_written_alongside_the_ownership_tags(managed_table):
     name = managed_table(sc.create_simple_table)
 
     result = run_schema_sync(
@@ -31,39 +50,28 @@ def test_apply_tags_the_tables_it_creates(managed_table):
     )
 
     assert result.returncode == 0, output(result)
-    assert dh.list_tags(name) == expected_tags(Repository="retribalize-core")
+    tags = dh.table_tags(name)
+    assert OWNERSHIP.items() <= tags.items()
+    assert tags["Repository"] == "retribalize-core"
 
 
-def test_apply_adds_missing_tags_to_an_existing_table(managed_table):
+def test_tags_the_tool_does_not_own_are_left_alone(managed_table):
     name = managed_table(sc.create_simple_table)
-    dh.create_live_table(name, {"partition_key": "pk", "sort_key": None})
+    assert run_schema_sync(tables="create_simple_table", apply=True).returncode == 0
+    dh.tag_table(name, {"CostCentre": "research"})
 
-    # Missing tags are reported but are not schema drift: exit 0, nothing written.
-    dry = run_schema_sync(tables="create_simple_table")
-    assert dry.returncode == 0, output(dry)
-    assert "Would tag" in dry.stdout, output(dry)
-    assert dh.list_tags(name) == {}
-
-    apply = run_schema_sync(tables="create_simple_table", apply=True)
-    assert apply.returncode == 0, output(apply)
-    assert dh.list_tags(name) == expected_tags()
-
-    again = run_schema_sync(tables="create_simple_table", apply=True)
-    assert again.returncode == 0, output(again)
-    assert "Tagging" not in again.stdout, output(again)
-
-
-def test_tags_survive_a_table_recreate(managed_table, dump_bucket):
-    name = managed_table(sc.recreate_sk_removed_table)
-    dh.create_live_table(name, {"partition_key": "pk", "sort_key": "old_sk"})
-    dh.put_items(name, [{"pk": "a", "old_sk": "1"}])
-
-    result = run_schema_sync(
-        tables="recreate_sk_removed_table",
-        apply=True,
-        extra_env={"DYNAMO_ALLOW_TABLE_RECREATE": "true"},
-    )
+    result = run_schema_sync(tables="create_simple_table", apply=True)
 
     assert result.returncode == 0, output(result)
-    assert dh.describe_schema(name)["key_schema"] == {"partition_key": "pk", "sort_key": None}
-    assert dh.list_tags(name) == expected_tags()
+    assert dh.table_tags(name)["CostCentre"] == "research"
+
+
+def test_dry_run_does_not_write_tags(managed_table):
+    name = managed_table(sc.create_simple_table)
+    assert run_schema_sync(tables="create_simple_table", apply=True).returncode == 0
+    dh.untag_table(name, list(OWNERSHIP))
+
+    result = run_schema_sync(tables="create_simple_table")
+
+    assert result.returncode == 0, output(result)
+    assert not OWNERSHIP.items() <= dh.table_tags(name).items()

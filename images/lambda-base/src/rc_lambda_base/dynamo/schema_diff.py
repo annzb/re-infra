@@ -28,11 +28,13 @@ deletion protection, and **local secondary indexes**. LSIs deserve the loudest
 warning: they cannot be added or removed after a table is created, so a live LSI
 this model cannot see is destroyed unrecoverably by any table recreate.
 """
+
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
+from typing import Any
 
 # Attribute-type codes DynamoDB allows on a key attribute.
 KEY_ATTRIBUTE_TYPES = ("S", "N", "B")
@@ -46,10 +48,10 @@ PROJECTION_TYPES = (PROJECTION_ALL, PROJECTION_KEYS_ONLY, PROJECTION_INCLUDE)
 class Severity(StrEnum):
     """What kind of difference this is -- descriptive, for grouping a report."""
 
-    CONFLICT = "conflict"      # declared and live disagree about a modeled thing
-    MISSING = "missing"        # declared, absent live
+    CONFLICT = "conflict"  # declared and live disagree about a modeled thing
+    MISSING = "missing"  # declared, absent live
     UNDECLARED = "undeclared"  # live, not modeled in Python
-    INFO = "info"              # observation this tooling does not manage
+    INFO = "info"  # observation this tooling does not manage
 
 
 class FindingKind(StrEnum):
@@ -98,7 +100,7 @@ class Permission(StrEnum):
 #
 # ADOPT_DECLARATION maps to None because it is never automatable: the only fix
 # is a human editing the Python. Those findings are reported and skipped.
-REQUIRED_PERMISSION: Mapping[Remedy, Optional[Permission]] = {
+REQUIRED_PERMISSION: Mapping[Remedy, Permission | None] = {
     Remedy.CREATE_TABLE: None,
     Remedy.CREATE_GSI: None,
     Remedy.REBUILD_GSI: None,
@@ -109,13 +111,15 @@ REQUIRED_PERMISSION: Mapping[Remedy, Optional[Permission]] = {
 }
 
 # Remedies the deploy executes. Everything else is report-only.
-AUTOMATABLE_REMEDIES = frozenset({
-    Remedy.CREATE_TABLE,
-    Remedy.CREATE_GSI,
-    Remedy.REBUILD_GSI,
-    Remedy.DELETE_GSI,
-    Remedy.RECREATE_TABLE,
-})
+AUTOMATABLE_REMEDIES = frozenset(
+    {
+        Remedy.CREATE_TABLE,
+        Remedy.CREATE_GSI,
+        Remedy.REBUILD_GSI,
+        Remedy.DELETE_GSI,
+        Remedy.RECREATE_TABLE,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -125,21 +129,21 @@ class Finding:
     remedy: Remedy
     table_name: str
     message: str
-    index_name: Optional[str] = None
-    attribute: Optional[str] = None
+    index_name: str | None = None
+    attribute: str | None = None
     declared: Any = None
     live: Any = None
 
     @property
-    def required_permission(self) -> Optional[Permission]:
+    def required_permission(self) -> Permission | None:
         return REQUIRED_PERMISSION[self.remedy]
 
     @property
     def is_automatable(self) -> bool:
         return self.remedy in AUTOMATABLE_REMEDIES
 
-    def to_json(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "kind": str(self.kind),
             "severity": str(self.severity),
             "remedy": str(self.remedy),
@@ -160,29 +164,30 @@ class Finding:
 @dataclass(frozen=True)
 class SchemaDiff:
     table_name: str
-    findings: Tuple[Finding, ...]
+    findings: tuple[Finding, ...]
 
     @property
     def is_clean(self) -> bool:
         return not self.findings
 
-    def of_severity(self, *severities: Severity) -> Tuple[Finding, ...]:
+    def of_severity(self, *severities: Severity) -> tuple[Finding, ...]:
         wanted = set(severities)
         return tuple(f for f in self.findings if f.severity in wanted)
 
-    def with_remedy(self, *remedies: Remedy) -> Tuple[Finding, ...]:
+    def with_remedy(self, *remedies: Remedy) -> tuple[Finding, ...]:
         wanted = set(remedies)
         return tuple(f for f in self.findings if f.remedy in wanted)
 
-    def actionable(self, granted: Mapping[Permission, bool]) -> Tuple[Finding, ...]:
+    def actionable(self, granted: Mapping[Permission, bool]) -> tuple[Finding, ...]:
         """Findings the deploy can and may execute, given the granted permissions."""
         return tuple(
-            f for f in self.findings
+            f
+            for f in self.findings
             if f.is_automatable
             and (f.required_permission is None or granted.get(f.required_permission, False))
         )
 
-    def blocked(self, granted: Mapping[Permission, bool]) -> Tuple[Finding, ...]:
+    def blocked(self, granted: Mapping[Permission, bool]) -> tuple[Finding, ...]:
         """Conflicts the deploy must resolve but is not permitted to. These fail the run.
 
         Only CONFLICT findings can block. An UNDECLARED finding without its
@@ -190,7 +195,8 @@ class SchemaDiff:
         intended behaviour, so it is simply skipped.
         """
         return tuple(
-            f for f in self.findings
+            f
+            for f in self.findings
             if f.severity is Severity.CONFLICT
             and f.is_automatable
             and f.required_permission is not None
@@ -206,7 +212,7 @@ class SchemaDiff:
         """
         return bool(self.actionable(granted) or self.blocked(granted))
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "table_name": self.table_name,
             "findings": [f.to_json() for f in self.findings],
@@ -221,7 +227,7 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def normalize_non_key_attributes(value: Any) -> Optional[FrozenSet[str]]:
+def normalize_non_key_attributes(value: Any) -> frozenset[str] | None:
     """DynamoDB returns NonKeyAttributes unordered, so compare it as a set."""
     if value is None:
         return None
@@ -240,8 +246,8 @@ def _describe_projection(gsi: Mapping[str, Any]) -> str:
 
 def resolve_projection(
     declared_gsi: Mapping[str, Any],
-    live_gsi: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
+    live_gsi: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """The projection to send to DynamoDB when creating or rebuilding an index.
 
     Declared wins. Otherwise inherit whatever is live -- **not** ALL. Projection
@@ -260,7 +266,7 @@ def resolve_projection(
         projection = PROJECTION_ALL
         non_key = None
 
-    resolved: Dict[str, Any] = {"ProjectionType": projection}
+    resolved: dict[str, Any] = {"ProjectionType": projection}
     if projection == PROJECTION_INCLUDE and non_key:
         resolved["NonKeyAttributes"] = sorted(non_key)
     return resolved
@@ -271,8 +277,8 @@ def _diff_gsi(
     index_name: str,
     declared: Mapping[str, Any],
     live: Mapping[str, Any],
-) -> List[Finding]:
-    findings: List[Finding] = []
+) -> list[Finding]:
+    findings: list[Finding] = []
 
     declared_pk = declared.get("partition_key")
     live_pk = live.get("partition_key")
@@ -281,50 +287,56 @@ def _diff_gsi(
 
     # A partition-key change is always a conflict; there is nothing to "adopt".
     if declared_pk != live_pk:
-        findings.append(Finding(
-            kind=FindingKind.CONFLICTING_GSI_KEY,
-            severity=Severity.CONFLICT,
-            remedy=Remedy.REBUILD_GSI,
-            table_name=table_name,
-            index_name=index_name,
-            message=(
-                f"{index_name}: declared partition key {declared_pk!r} but live is "
-                f"{live_pk!r}; the index will be rebuilt to match the declaration"
-            ),
-            declared=dict(declared),
-            live=dict(live),
-        ))
+        findings.append(
+            Finding(
+                kind=FindingKind.CONFLICTING_GSI_KEY,
+                severity=Severity.CONFLICT,
+                remedy=Remedy.REBUILD_GSI,
+                table_name=table_name,
+                index_name=index_name,
+                message=(
+                    f"{index_name}: declared partition key {declared_pk!r} but live is "
+                    f"{live_pk!r}; the index will be rebuilt to match the declaration"
+                ),
+                declared=dict(declared),
+                live=dict(live),
+            )
+        )
     elif declared_sk is None and live_sk is not None:
         # Unmodeled sort key: the shorthand cannot express it. Report, never touch.
-        findings.append(Finding(
-            kind=FindingKind.UNDECLARED_SORT_KEY,
-            severity=Severity.UNDECLARED,
-            remedy=Remedy.ADOPT_DECLARATION,
-            table_name=table_name,
-            index_name=index_name,
-            attribute=live_sk,
-            message=(
-                f"{index_name}: live index has sort key {live_sk!r}, which the "
-                f"declaration does not model. Left as-is; declare it in "
-                f"gsi_schemas to make it authoritative"
-            ),
-            declared=dict(declared),
-            live=dict(live),
-        ))
+        findings.append(
+            Finding(
+                kind=FindingKind.UNDECLARED_SORT_KEY,
+                severity=Severity.UNDECLARED,
+                remedy=Remedy.ADOPT_DECLARATION,
+                table_name=table_name,
+                index_name=index_name,
+                attribute=live_sk,
+                message=(
+                    f"{index_name}: live index has sort key {live_sk!r}, which the "
+                    f"declaration does not model. Left as-is; declare it in "
+                    f"gsi_schemas to make it authoritative"
+                ),
+                declared=dict(declared),
+                live=dict(live),
+            )
+        )
     elif declared_sk != live_sk:
-        findings.append(Finding(
-            kind=FindingKind.CONFLICTING_GSI_KEY,
-            severity=Severity.CONFLICT,
-            remedy=Remedy.REBUILD_GSI,
-            table_name=table_name,
-            index_name=index_name,
-            message=(
-                f"{index_name}: declared sort key {declared_sk!r} but live is "
-                f"{live_sk!r}; the index will be rebuilt to match the declaration"
-            ),
-            declared=dict(declared),
-            live=dict(live),
-        ))
+        findings.append(
+            Finding(
+                kind=FindingKind.CONFLICTING_GSI_KEY,
+                severity=Severity.CONFLICT,
+                remedy=Remedy.REBUILD_GSI,
+                table_name=table_name,
+                index_name=index_name,
+                message=(
+                    f"{index_name}: declared sort key {declared_sk!r} but live is "
+                    f"{live_sk!r}; the index will be rebuilt to match the declaration"
+                ),
+                declared=dict(declared),
+                live=dict(live),
+            )
+        )
 
     declared_projection = declared.get("projection")
     live_projection = live.get("projection")
@@ -335,42 +347,46 @@ def _diff_gsi(
         # Only worth reporting when the live projection is something a future
         # rebuild could lose. ALL is the create-time default, so it is not news.
         if live_projection is not None and live_projection != PROJECTION_ALL:
-            findings.append(Finding(
-                kind=FindingKind.UNDECLARED_PROJECTION,
-                severity=Severity.UNDECLARED,
-                remedy=Remedy.ADOPT_DECLARATION,
+            findings.append(
+                Finding(
+                    kind=FindingKind.UNDECLARED_PROJECTION,
+                    severity=Severity.UNDECLARED,
+                    remedy=Remedy.ADOPT_DECLARATION,
+                    table_name=table_name,
+                    index_name=index_name,
+                    message=(
+                        f"{index_name}: live projection is {_describe_projection(live)}, "
+                        f"which the declaration does not model. Inherited on rebuild; "
+                        f"declare it in gsi_schemas to make it authoritative"
+                    ),
+                    declared=None,
+                    live=dict(live),
+                )
+            )
+    elif (declared_projection, declared_non_key) != (live_projection, live_non_key):
+        findings.append(
+            Finding(
+                kind=FindingKind.CONFLICTING_PROJECTION,
+                severity=Severity.CONFLICT,
+                remedy=Remedy.REBUILD_GSI,
                 table_name=table_name,
                 index_name=index_name,
                 message=(
-                    f"{index_name}: live projection is {_describe_projection(live)}, "
-                    f"which the declaration does not model. Inherited on rebuild; "
-                    f"declare it in gsi_schemas to make it authoritative"
+                    f"{index_name}: declared projection {_describe_projection(declared)} "
+                    f"but live is {_describe_projection(live)}; the index will be rebuilt "
+                    f"to match the declaration"
                 ),
-                declared=None,
+                declared=dict(declared),
                 live=dict(live),
-            ))
-    elif (declared_projection, declared_non_key) != (live_projection, live_non_key):
-        findings.append(Finding(
-            kind=FindingKind.CONFLICTING_PROJECTION,
-            severity=Severity.CONFLICT,
-            remedy=Remedy.REBUILD_GSI,
-            table_name=table_name,
-            index_name=index_name,
-            message=(
-                f"{index_name}: declared projection {_describe_projection(declared)} "
-                f"but live is {_describe_projection(live)}; the index will be rebuilt "
-                f"to match the declaration"
-            ),
-            declared=dict(declared),
-            live=dict(live),
-        ))
+            )
+        )
 
     return findings
 
 
 def diff_schemas(
     expected: Mapping[str, Any],
-    actual: Optional[Mapping[str, Any]],
+    actual: Mapping[str, Any] | None,
 ) -> SchemaDiff:
     """Compare a declared schema against the live one.
 
@@ -379,66 +395,82 @@ def diff_schemas(
     table_name = expected["table_name"]
 
     if actual is None:
-        return SchemaDiff(table_name=table_name, findings=(Finding(
-            kind=FindingKind.MISSING_TABLE,
-            severity=Severity.MISSING,
-            remedy=Remedy.CREATE_TABLE,
+        return SchemaDiff(
             table_name=table_name,
-            message=f"Missing table {table_name}: declared but does not exist; it will be created",
-            declared=dict(expected["key_schema"]),
-        ),))
+            findings=(
+                Finding(
+                    kind=FindingKind.MISSING_TABLE,
+                    severity=Severity.MISSING,
+                    remedy=Remedy.CREATE_TABLE,
+                    table_name=table_name,
+                    message=(
+                        f"Missing table {table_name}: declared but does not exist; "
+                        "it will be created"
+                    ),
+                    declared=dict(expected["key_schema"]),
+                ),
+            ),
+        )
 
-    findings: List[Finding] = []
+    findings: list[Finding] = []
 
     if expected["key_schema"] != actual["key_schema"]:
-        findings.append(Finding(
-            kind=FindingKind.CONFLICTING_TABLE_KEY,
-            severity=Severity.CONFLICT,
-            remedy=Remedy.RECREATE_TABLE,
-            table_name=table_name,
-            message=(
-                f"{table_name}: declared primary key {expected['key_schema']} but "
-                f"live is {actual['key_schema']}; only a table recreate can fix this"
-            ),
-            declared=dict(expected["key_schema"]),
-            live=dict(actual["key_schema"]),
-        ))
+        findings.append(
+            Finding(
+                kind=FindingKind.CONFLICTING_TABLE_KEY,
+                severity=Severity.CONFLICT,
+                remedy=Remedy.RECREATE_TABLE,
+                table_name=table_name,
+                message=(
+                    f"{table_name}: declared primary key {expected['key_schema']} but "
+                    f"live is {actual['key_schema']}; only a table recreate can fix this"
+                ),
+                declared=dict(expected["key_schema"]),
+                live=dict(actual["key_schema"]),
+            )
+        )
 
     expected_gsis: Mapping[str, Mapping[str, Any]] = expected.get("gsis", {})
     actual_gsis: Mapping[str, Mapping[str, Any]] = actual.get("gsis", {})
 
     for index_name in sorted(set(expected_gsis) - set(actual_gsis)):
-        findings.append(Finding(
-            kind=FindingKind.MISSING_GSI,
-            severity=Severity.MISSING,
-            remedy=Remedy.CREATE_GSI,
-            table_name=table_name,
-            index_name=index_name,
-            message=f"{index_name}: declared but absent; it will be created",
-            declared=dict(expected_gsis[index_name]),
-        ))
+        findings.append(
+            Finding(
+                kind=FindingKind.MISSING_GSI,
+                severity=Severity.MISSING,
+                remedy=Remedy.CREATE_GSI,
+                table_name=table_name,
+                index_name=index_name,
+                message=f"{index_name}: declared but absent; it will be created",
+                declared=dict(expected_gsis[index_name]),
+            )
+        )
 
     for index_name in sorted(set(actual_gsis) - set(expected_gsis)):
-        findings.append(Finding(
-            kind=FindingKind.UNDECLARED_GSI,
-            severity=Severity.UNDECLARED,
-            remedy=Remedy.DELETE_GSI,
-            table_name=table_name,
-            index_name=index_name,
-            message=(
-                f"{index_name}: live index is not declared in Python. Left as-is; "
-                f"declare it to adopt it, or enable pruning to delete it"
-            ),
-            live=dict(actual_gsis[index_name]),
-        ))
+        findings.append(
+            Finding(
+                kind=FindingKind.UNDECLARED_GSI,
+                severity=Severity.UNDECLARED,
+                remedy=Remedy.DELETE_GSI,
+                table_name=table_name,
+                index_name=index_name,
+                message=(
+                    f"{index_name}: live index is not declared in Python. Left as-is; "
+                    f"declare it to adopt it, or enable pruning to delete it"
+                ),
+                live=dict(actual_gsis[index_name]),
+            )
+        )
 
     for index_name in sorted(set(expected_gsis) & set(actual_gsis)):
-        findings.extend(_diff_gsi(
-            table_name=table_name,
-            index_name=index_name,
-            declared=expected_gsis[index_name],
-            live=actual_gsis[index_name],
-        ))
+        findings.extend(
+            _diff_gsi(
+                table_name=table_name,
+                index_name=index_name,
+                declared=expected_gsis[index_name],
+                live=actual_gsis[index_name],
+            )
+        )
 
     # A key attribute's type cannot be altered in place, so a mismatch is a
     # table recreate. Only compare attributes both sides consider key attributes.
@@ -447,37 +479,41 @@ def diff_schemas(
     for attribute in sorted(set(expected_types) & set(actual_types)):
         if expected_types[attribute] == actual_types[attribute]:
             continue
-        findings.append(Finding(
-            kind=FindingKind.CONFLICTING_ATTRIBUTE_TYPE,
-            severity=Severity.CONFLICT,
-            remedy=Remedy.RECREATE_TABLE,
-            table_name=table_name,
-            attribute=attribute,
-            message=(
-                f"{table_name}: key attribute {attribute!r} is declared "
-                f"{expected_types[attribute]!r} but live is {actual_types[attribute]!r}; "
-                f"only a table recreate can fix this"
-            ),
-            declared=expected_types[attribute],
-            live=actual_types[attribute],
-        ))
+        findings.append(
+            Finding(
+                kind=FindingKind.CONFLICTING_ATTRIBUTE_TYPE,
+                severity=Severity.CONFLICT,
+                remedy=Remedy.RECREATE_TABLE,
+                table_name=table_name,
+                attribute=attribute,
+                message=(
+                    f"{table_name}: key attribute {attribute!r} is declared "
+                    f"{expected_types[attribute]!r} but live is {actual_types[attribute]!r}; "
+                    f"only a table recreate can fix this"
+                ),
+                declared=expected_types[attribute],
+                live=actual_types[attribute],
+            )
+        )
 
     # Billing mode is not declarable today -- expected_schema() hardcodes
     # PAY_PER_REQUEST -- so a mismatch is an observation, not drift.
     expected_billing = expected.get("billing_mode")
     actual_billing = actual.get("billing_mode")
     if expected_billing and actual_billing and expected_billing != actual_billing:
-        findings.append(Finding(
-            kind=FindingKind.UNMANAGED_BILLING_MODE,
-            severity=Severity.INFO,
-            remedy=Remedy.NONE,
-            table_name=table_name,
-            message=(
-                f"{table_name}: live billing mode is {actual_billing!r} but the code "
-                f"assumes {expected_billing!r}. Not managed by this tooling"
-            ),
-            declared=expected_billing,
-            live=actual_billing,
-        ))
+        findings.append(
+            Finding(
+                kind=FindingKind.UNMANAGED_BILLING_MODE,
+                severity=Severity.INFO,
+                remedy=Remedy.NONE,
+                table_name=table_name,
+                message=(
+                    f"{table_name}: live billing mode is {actual_billing!r} but the code "
+                    f"assumes {expected_billing!r}. Not managed by this tooling"
+                ),
+                declared=expected_billing,
+                live=actual_billing,
+            )
+        )
 
     return SchemaDiff(table_name=table_name, findings=tuple(findings))

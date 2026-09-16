@@ -9,8 +9,7 @@ on:
     branches: [main]
     paths:
       - environments/**
-      - infrastructure/platform/**
-      - infrastructure/environment/**
+      - infra/**
       - src/**
       - pyproject.toml
       - uv.lock
@@ -58,7 +57,7 @@ jobs:
       - name: Validate
         run: |
           uv run pytest
-          uv run cfn-lint infrastructure/*/template.yaml
+          uv run cfn-lint infra/*.yaml
           uv run rc-infra validate
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0

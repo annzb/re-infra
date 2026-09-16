@@ -7,12 +7,13 @@ Exit codes (both commands):
   2  usage error
   3  differences found (sync dry run: pending schema changes; report: findings)
 """
+
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-from typing import Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 from rc_lambda_base.dynamo.schema_report import (
     MAX_SAMPLE_WITHOUT_OPT_IN,
@@ -58,11 +59,11 @@ Report how live DynamoDB tables differ from their Python declarations. Read-only
 """
 
 
-def _env(name: str) -> Optional[str]:
+def _env(name: str) -> str | None:
     return os.environ.get(name, "").strip() or None
 
 
-def parse_tag(value: str) -> Tuple[str, str]:
+def parse_tag(value: str) -> tuple[str, str]:
     key, separator, tag_value = value.partition("=")
     if not separator or not key.strip():
         raise argparse.ArgumentTypeError(f"expected KEY=VALUE, got {value!r}")
@@ -105,7 +106,10 @@ def build_sync_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--environment",
         default=_env("RC_ENVIRONMENT"),
-        help="Environment written to the tables' Environment tag. Required with --apply. Defaults to RC_ENVIRONMENT.",
+        help=(
+            "Environment written to the tables' Environment tag. Required with "
+            "--apply. Defaults to RC_ENVIRONMENT."
+        ),
     )
     parser.add_argument(
         "--tag",
@@ -118,14 +122,17 @@ def build_sync_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def sync_main(argv: Optional[Sequence[str]] = None) -> int:
+def sync_main(argv: Sequence[str] | None = None) -> int:
     parser = build_sync_parser()
     args = parser.parse_args(argv)
 
     if not args.schema_module:
         parser.error("--schema-module (or DYNAMO_SCHEMA_MODULE) is required")
     if args.apply and not args.environment:
-        parser.error("--environment (or RC_ENVIRONMENT) is required with --apply; it is written to table tags")
+        parser.error(
+            "--environment (or RC_ENVIRONMENT) is required with --apply; "
+            "it is written to table tags"
+        )
     if args.tag and not args.environment:
         parser.error("--tag requires --environment (or RC_ENVIRONMENT)")
 
@@ -186,7 +193,7 @@ def build_report_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def report_main(argv: Optional[Sequence[str]] = None) -> int:
+def report_main(argv: Sequence[str] | None = None) -> int:
     parser = build_report_parser()
     args = parser.parse_args(argv)
 

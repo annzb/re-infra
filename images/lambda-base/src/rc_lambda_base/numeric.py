@@ -1,4 +1,5 @@
 """Recursive float <-> Decimal conversion for DynamoDB reads and writes."""
+
 from decimal import Decimal
 
 

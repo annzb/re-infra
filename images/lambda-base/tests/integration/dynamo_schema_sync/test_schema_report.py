@@ -1,9 +1,10 @@
-"""The drift report: rc-dynamo-report.
+"""The local drift report: the rc-dynamo-report console script.
 
 This is the tool for the "somebody changed a table in the console" problem, so
 what matters is that it *finds* undeclared work and emits a declaration that can
 actually be pasted into the model.
 """
+
 from __future__ import annotations
 
 import json
@@ -96,7 +97,7 @@ def test_python_format_emits_a_pasteable_declaration(managed_table):
 
 def test_python_format_flags_a_sort_key_that_is_not_a_model_field(managed_table):
     # The GSI2-EntityType/CreatedAt trap: naming a non-field in gsi_schemas makes
-    # BaseItem raise at class-definition time, so importing the schema module fails
+    # BaseItem raise at class-definition time, so `import aws_utils.dynamo` fails
     # and nothing boots. The emitted block must refuse to be half-pasted.
     name = managed_table(sc.remote_only_gsi_table)
     dh.create_live_table(

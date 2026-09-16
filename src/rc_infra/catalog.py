@@ -29,7 +29,7 @@ ENVIRONMENT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]{1,19}$")
 
 DEFAULT_IDENTITY_PROFILE = "preview"
 
-# Bucket purpose -> logical ID in infrastructure/environment/template.yaml.
+# Bucket purpose -> logical ID in infra/environment.yaml.
 BUCKET_LOGICAL_IDS: dict[str, str] = {
     "embeddings": "EmbeddingsBucket",
     "user-corpus": "UserCorpusBucket",

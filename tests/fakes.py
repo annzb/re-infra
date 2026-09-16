@@ -176,7 +176,7 @@ def bucket_name(environment: str, purpose: str) -> str:
 
 
 def matching_live_config(purpose: str) -> dict[str, Any]:
-    """Live S3 responses that match infrastructure/environment/template.yaml for a purpose."""
+    """Live S3 responses that match infra/environment.yaml for a purpose."""
     lifecycle = {
         "user-corpus": {
             "Rules": [

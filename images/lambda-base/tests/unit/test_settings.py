@@ -1,4 +1,5 @@
 """Settings parsing: defaults, booleans, numbers, and the legacy-flag guard."""
+
 import pytest
 
 from rc_lambda_base.settings import Settings, SettingsError
@@ -9,14 +10,16 @@ def test_defaults_when_nothing_is_set():
 
 
 def test_reads_every_setting():
-    settings = Settings.from_env({
-        "AWS_REGION": "eu-west-1",
-        "AWS_ENDPOINT_URL": "http://localhost:4566",
-        "DYNAMO_SCHEMA_POLL_SECONDS": "1",
-        "DYNAMO_SCHEMA_WAIT_TIMEOUT_SECONDS": "30.5",
-        "DYNAMO_PRUNE_UNDECLARED": "true",
-        "DYNAMO_ALLOW_TABLE_RECREATE": "yes",
-    })
+    settings = Settings.from_env(
+        {
+            "AWS_REGION": "eu-west-1",
+            "AWS_ENDPOINT_URL": "http://localhost:4566",
+            "DYNAMO_SCHEMA_POLL_SECONDS": "1",
+            "DYNAMO_SCHEMA_WAIT_TIMEOUT_SECONDS": "30.5",
+            "DYNAMO_PRUNE_UNDECLARED": "true",
+            "DYNAMO_ALLOW_TABLE_RECREATE": "yes",
+        }
+    )
 
     assert settings == Settings(
         aws_region="eu-west-1",
@@ -33,7 +36,9 @@ def test_region_falls_back_to_aws_default_region():
 
 
 def test_blank_values_use_defaults():
-    settings = Settings.from_env({"AWS_ENDPOINT_URL": " ", "DYNAMO_PRUNE_UNDECLARED": "", "AWS_REGION": ""})
+    settings = Settings.from_env(
+        {"AWS_ENDPOINT_URL": " ", "DYNAMO_PRUNE_UNDECLARED": "", "AWS_REGION": ""}
+    )
     assert settings.aws_endpoint_url is None
     assert settings.prune_undeclared is False
     assert settings.aws_region == "us-east-1"

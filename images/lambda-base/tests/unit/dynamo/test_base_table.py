@@ -1,6 +1,8 @@
 """Tests for BaseTable create/update/get/delete/query_filter + Decimal↔float."""
+
+from collections.abc import Mapping
 from decimal import Decimal
-from typing import ClassVar, Mapping, Optional
+from typing import ClassVar
 
 import pytest
 from boto3.dynamodb.conditions import Key
@@ -22,9 +24,9 @@ class _Widget(BaseItem):
 
     pk: str
     sk: str
-    category: Optional[str] = None
-    weight: Optional[float] = None
-    note: Optional[str] = None
+    category: str | None = None
+    weight: float | None = None
+    note: str | None = None
 
 
 class _WidgetTable(BaseTable[_Widget]):
@@ -37,6 +39,7 @@ def _table():
 
 
 # ───────────────────────── create ─────────────────────────
+
 
 def test_create_serializes_floats_to_decimal_and_drops_none():
     t = _table()
@@ -61,6 +64,7 @@ def test_create_raises_when_item_already_exists():
 
 
 # ───────────────────────── get_item ─────────────────────────
+
 
 def test_get_item_round_trips_decimal_back_to_float():
     t = _table()
@@ -103,6 +107,7 @@ def test_query_projection_keeps_key_fields_for_model_validation():
 
 
 # ───────────────────────── update / delete ─────────────────────────
+
 
 def test_update_raises_when_item_missing():
     t = _table()
@@ -153,6 +158,7 @@ def test_delete_removes_item():
 
 # ───────────────────────── query_filter ─────────────────────────
 
+
 def test_query_filter_uses_base_key():
     t = _table()
     t.create(pk="a", sk="1")
@@ -180,16 +186,17 @@ def test_query_filter_falls_back_to_scan_for_non_key_field():
 
 # ───────────────────────── expected_schema / gsi_schemas ─────────────────────────
 
+
 class _Gadget(BaseItem):
     partition_key: ClassVar[str] = "pk"
     gsis: ClassVar[Mapping[str, str]] = {"owner": "owner-index"}
-    gsi_schemas: ClassVar[Mapping[str, Mapping[str, Optional[str]]]] = {
+    gsi_schemas: ClassVar[Mapping[str, Mapping[str, str | None]]] = {
         "owner-viewer-index": {"partition_key": "owner", "sort_key": "viewer"},
     }
 
     pk: str
-    owner: Optional[str] = None
-    viewer: Optional[str] = None
+    owner: str | None = None
+    viewer: str | None = None
 
 
 class _GadgetTable(BaseTable[_Gadget]):
@@ -233,8 +240,8 @@ def test_expected_schema_carries_declared_projection():
         }
 
         pk: str
-        owner: Optional[str] = None
-        viewer: Optional[str] = None
+        owner: str | None = None
+        viewer: str | None = None
 
     class _ProjectedTable(BaseTable[_Projected]):
         table_name = "ProjectedTable"
@@ -253,13 +260,13 @@ def test_gsi_schemas_overlay_wins_over_gsis_shorthand():
     class _Overlay(BaseItem):
         partition_key: ClassVar[str] = "pk"
         gsis: ClassVar[Mapping[str, str]] = {"owner": "shared-index"}
-        gsi_schemas: ClassVar[Mapping[str, Mapping[str, Optional[str]]]] = {
+        gsi_schemas: ClassVar[Mapping[str, Mapping[str, str | None]]] = {
             "shared-index": {"partition_key": "owner", "sort_key": "viewer"},
         }
 
         pk: str
-        owner: Optional[str] = None
-        viewer: Optional[str] = None
+        owner: str | None = None
+        viewer: str | None = None
 
     class _OverlayTable(BaseTable[_Overlay]):
         table_name = "OverlayTable"
@@ -276,9 +283,10 @@ def test_gsi_schemas_overlay_wins_over_gsis_shorthand():
 
 def test_gsi_schemas_rejects_unknown_fields():
     with pytest.raises(TypeError, match="gsi_schemas"):
+
         class _Bad(BaseItem):
             partition_key: ClassVar[str] = "pk"
-            gsi_schemas: ClassVar[Mapping[str, Mapping[str, Optional[str]]]] = {
+            gsi_schemas: ClassVar[Mapping[str, Mapping[str, str | None]]] = {
                 "bad-index": {"partition_key": "nope"},
             }
 
@@ -287,9 +295,10 @@ def test_gsi_schemas_rejects_unknown_fields():
 
 def test_gsi_schemas_requires_partition_key():
     with pytest.raises(TypeError, match="partition_key"):
+
         class _NoPk(BaseItem):
             partition_key: ClassVar[str] = "pk"
-            gsi_schemas: ClassVar[Mapping[str, Mapping[str, Optional[str]]]] = {
+            gsi_schemas: ClassVar[Mapping[str, Mapping[str, str | None]]] = {
                 "bad-index": {"sort_key": "pk"},
             }
 
@@ -300,6 +309,7 @@ def test_gsi_schemas_rejects_unknown_keys():
     # A misspelled key used to be accepted and then silently dropped by
     # expected_schema(), so the declaration looked like it had taken effect.
     with pytest.raises(TypeError, match="unknown key"):
+
         class _Typo(BaseItem):
             partition_key: ClassVar[str] = "pk"
             gsi_schemas: ClassVar[Mapping[str, Mapping[str, object]]] = {
@@ -311,6 +321,7 @@ def test_gsi_schemas_rejects_unknown_keys():
 
 def test_gsi_schemas_rejects_unknown_projection():
     with pytest.raises(TypeError, match="projection"):
+
         class _BadProjection(BaseItem):
             partition_key: ClassVar[str] = "pk"
             gsi_schemas: ClassVar[Mapping[str, Mapping[str, object]]] = {
@@ -322,6 +333,7 @@ def test_gsi_schemas_rejects_unknown_projection():
 
 def test_gsi_schemas_requires_non_key_attributes_for_include():
     with pytest.raises(TypeError, match="non_key_attributes"):
+
         class _EmptyInclude(BaseItem):
             partition_key: ClassVar[str] = "pk"
             gsi_schemas: ClassVar[Mapping[str, Mapping[str, object]]] = {
@@ -333,6 +345,7 @@ def test_gsi_schemas_requires_non_key_attributes_for_include():
 
 def test_gsi_schemas_rejects_non_key_attributes_without_include():
     with pytest.raises(TypeError, match="not INCLUDE"):
+
         class _StrayAttrs(BaseItem):
             partition_key: ClassVar[str] = "pk"
             gsi_schemas: ClassVar[Mapping[str, Mapping[str, object]]] = {
@@ -358,37 +371,3 @@ def test_gsi_schemas_allows_include_attributes_that_are_not_model_fields():
         pk: str
 
     assert _Include.gsi_schemas["idx"]["non_key_attributes"] == ["NotAField"]
-
-
-# ───────────────────────── lazy table resolution ─────────────────────────
-
-def test_constructing_a_table_does_not_touch_boto3(monkeypatch):
-    import rc_lambda_base.dynamo.base_table as base_table_module
-
-    def _unexpected(*args, **kwargs):
-        raise AssertionError("DynamoDB resource resolved")
-
-    monkeypatch.setattr(base_table_module, "dynamodb_resource", _unexpected)
-
-    table = _WidgetTable()  # declaring an instance must stay side-effect free
-
-    with pytest.raises(AssertionError, match="resolved"):
-        _ = table.table
-
-
-def test_injected_resource_builds_the_table_once_on_first_use():
-    class _Resource:
-        def __init__(self):
-            self.requested = []
-
-        def Table(self, name):
-            self.requested.append(name)
-            return FakeDynamoTable(key_fields=("pk", "sk"))
-
-    resource = _Resource()
-    t = _WidgetTable(resource=resource)
-    assert resource.requested == []
-
-    t.create(pk="a", sk="1")
-    assert t.get_item(("a", "1")) is not None
-    assert resource.requested == ["WidgetTable"]

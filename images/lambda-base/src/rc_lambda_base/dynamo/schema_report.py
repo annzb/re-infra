@@ -15,11 +15,13 @@ inherits rather than reproduces it. `--format python` emits the declaration.
 `rebuild_gsi` / `recreate_table` findings are what the next deploy would change.
 Check those are what you intend before deploying.
 """
+
 from __future__ import annotations
 
 import json
 from collections import Counter
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 from rc_lambda_base.dynamo.base_table import BaseTable
 from rc_lambda_base.dynamo.schema_diff import Finding, FindingKind, Remedy, Severity, diff_schemas
@@ -47,7 +49,7 @@ def check_sample_size(sample_items: int, allow_large_sample: bool) -> None:
 # ─────────────────────────── undeclared attributes ───────────────────────────
 
 
-def sample_attributes(table: BaseTable[Any], limit: int) -> Tuple[Counter, int]:
+def sample_attributes(table: BaseTable[Any], limit: int) -> tuple[Counter, int]:
     """Count attribute names across a bounded sample of items.
 
     Also samples each GSI separately. Scan returns items in partition-hash
@@ -59,14 +61,14 @@ def sample_attributes(table: BaseTable[Any], limit: int) -> Tuple[Counter, int]:
     counts: Counter = Counter()
     seen = 0
 
-    sources: List[Dict[str, Any]] = [{}]
+    sources: list[dict[str, Any]] = [{}]
     sources += [{"IndexName": name} for name in sorted(table.actual_schema().get("gsis", {}))]
 
     per_source = max(1, limit // len(sources))
 
     for source in sources:
         remaining = per_source
-        kwargs: Dict[str, Any] = dict(source)
+        kwargs: dict[str, Any] = dict(source)
         while remaining > 0:
             kwargs["Limit"] = min(remaining, 100)
             response = table.table.scan(**kwargs)
@@ -83,7 +85,7 @@ def sample_attributes(table: BaseTable[Any], limit: int) -> Tuple[Counter, int]:
     return counts, seen
 
 
-def undeclared_attribute_findings(table: BaseTable[Any], limit: int) -> List[Finding]:
+def undeclared_attribute_findings(table: BaseTable[Any], limit: int) -> list[Finding]:
     item_model = table.item_model
     declared = set(item_model.model_fields)
     acknowledged = set(getattr(item_model, "ignored_attributes", frozenset()))
@@ -97,19 +99,21 @@ def undeclared_attribute_findings(table: BaseTable[Any], limit: int) -> List[Fin
     findings = []
 
     for attribute in sorted(set(counts) - declared - acknowledged - key_attributes):
-        findings.append(Finding(
-            kind=FindingKind.UNDECLARED_ATTRIBUTE,
-            severity=Severity.UNDECLARED,
-            remedy=Remedy.ADOPT_DECLARATION,
-            table_name=table.table_name,
-            attribute=attribute,
-            message=(
-                f"{attribute!r}: present on {counts[attribute]}/{sampled} sampled items "
-                f"but not a field on {item_model.__name__} "
-                f"({'kept at runtime, extra=allow' if permissive else 'DROPPED on read'})"
-            ),
-            live=counts[attribute],
-        ))
+        findings.append(
+            Finding(
+                kind=FindingKind.UNDECLARED_ATTRIBUTE,
+                severity=Severity.UNDECLARED,
+                remedy=Remedy.ADOPT_DECLARATION,
+                table_name=table.table_name,
+                attribute=attribute,
+                message=(
+                    f"{attribute!r}: present on {counts[attribute]}/{sampled} sampled items "
+                    f"but not a field on {item_model.__name__} "
+                    f"({'kept at runtime, extra=allow' if permissive else 'DROPPED on read'})"
+                ),
+                live=counts[attribute],
+            )
+        )
 
     return findings
 
@@ -117,16 +121,21 @@ def undeclared_attribute_findings(table: BaseTable[Any], limit: int) -> List[Fin
 # ────────────────────────────────── codegen ──────────────────────────────────
 
 
-def python_suggestions(table: BaseTable[Any], findings: Sequence[Finding]) -> Optional[str]:
+def python_suggestions(table: BaseTable[Any], findings: Sequence[Finding]) -> str | None:
     """Paste-ready declarations adopting whatever is live but unmodeled.
 
     Emits the *whole* gsi_schemas block, merged with what the model already
     declares, so pasting over the existing one is correct.
     """
     adoptable = {
-        f.index_name for f in findings
-        if f.kind in (FindingKind.UNDECLARED_SORT_KEY, FindingKind.UNDECLARED_PROJECTION,
-                      FindingKind.UNDECLARED_GSI)
+        f.index_name
+        for f in findings
+        if f.kind
+        in (
+            FindingKind.UNDECLARED_SORT_KEY,
+            FindingKind.UNDECLARED_PROJECTION,
+            FindingKind.UNDECLARED_GSI,
+        )
         and f.index_name
     }
     if not adoptable:
@@ -138,14 +147,14 @@ def python_suggestions(table: BaseTable[Any], findings: Sequence[Finding]) -> Op
     attribute_types = live.get("attribute_types", {})
     declared_fields = set(item_model.model_fields)
 
-    merged: Dict[str, Dict[str, Any]] = {
+    merged: dict[str, dict[str, Any]] = {
         name: dict(spec) for name, spec in getattr(item_model, "gsi_schemas", {}).items()
     }
     for index_name in sorted(name for name in adoptable if name):
         gsi = live_gsis.get(index_name)
         if not gsi:
             continue
-        spec: Dict[str, Any] = {"partition_key": gsi.get("partition_key")}
+        spec: dict[str, Any] = {"partition_key": gsi.get("partition_key")}
         if gsi.get("sort_key"):
             spec["sort_key"] = gsi["sort_key"]
         if gsi.get("projection") and gsi["projection"] != "ALL":
@@ -157,14 +166,16 @@ def python_suggestions(table: BaseTable[Any], findings: Sequence[Finding]) -> Op
     # Every partition_key/sort_key named in gsi_schemas must be a declared field,
     # or BaseItem.__pydantic_init_subclass__ raises at class-definition time --
     # which means importing the schema module fails and nothing starts.
-    missing_fields = sorted({
-        name
-        for spec in merged.values()
-        for name in (spec.get("partition_key"), spec.get("sort_key"))
-        if name and name not in declared_fields
-    })
+    missing_fields = sorted(
+        {
+            name
+            for spec in merged.values()
+            for name in (spec.get("partition_key"), spec.get("sort_key"))
+            if name and name not in declared_fields
+        }
+    )
 
-    lines: List[str] = [
+    lines: list[str] = [
         f"# ── {item_model.__name__} ({table.table_name}) ──",
     ]
 
@@ -204,7 +215,11 @@ def render_text(table_name: str, findings: Sequence[Finding]) -> str:
     if not findings:
         return f"{table_name}: OK -- live schema matches the declaration"
 
-    groups: Dict[str, List[Finding]] = {"Will change on next deploy": [], "Undeclared (left alone)": [], "Info": []}
+    groups: dict[str, list[Finding]] = {
+        "Will change on next deploy": [],
+        "Undeclared (left alone)": [],
+        "Info": [],
+    }
     for finding in findings:
         if finding.remedy is Remedy.ADOPT_DECLARATION:
             groups["Undeclared (left alone)"].append(finding)
@@ -228,14 +243,14 @@ def build_report(
     *,
     fmt: str = "text",
     sample_items: int = 0,
-    settings: Optional[Settings] = None,
-) -> Tuple[str, bool]:
+    settings: Settings | None = None,
+) -> tuple[str, bool]:
     """Render the report. Returns ``(output, any_findings)``."""
     if fmt not in REPORT_FORMATS:
         raise SchemaReportError(f"Unknown format {fmt!r}; expected one of {REPORT_FORMATS}")
     settings = settings if settings is not None else Settings.from_env()
 
-    lines: List[str] = []
+    lines: list[str] = []
     if fmt == "text":
         lines += [
             f"Tables: {', '.join(t.table_name for t in tables)}",
@@ -245,8 +260,8 @@ def build_report(
             "",
         ]
 
-    payload: List[Dict[str, Any]] = []
-    suggestions: List[str] = []
+    payload: list[dict[str, Any]] = []
+    suggestions: list[str] = []
     any_findings = False
 
     for table in tables:
@@ -263,7 +278,9 @@ def build_report(
         if fmt == "text":
             lines += [render_text(table.table_name, findings), ""]
         elif fmt == "json":
-            payload.append({"table_name": table.table_name, "findings": [f.to_json() for f in findings]})
+            payload.append(
+                {"table_name": table.table_name, "findings": [f.to_json() for f in findings]}
+            )
         elif actual is not None:
             block = python_suggestions(table, findings)
             if block:
@@ -272,6 +289,10 @@ def build_report(
     if fmt == "json":
         lines.append(json.dumps(payload, indent=2, sort_keys=True))
     elif fmt == "python":
-        lines.append("\n\n".join(suggestions) if suggestions else "# Nothing to adopt: every live index is fully declared.")
+        lines.append(
+            "\n\n".join(suggestions)
+            if suggestions
+            else "# Nothing to adopt: every live index is fully declared."
+        )
 
     return "\n".join(lines), any_findings

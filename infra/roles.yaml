@@ -280,8 +280,7 @@ Resources:
                   - ecr:PutImage
                   - ecr:UploadLayerPart
                 Resource:
-                  - Fn::Sub: "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/rc-lambda-base"
-                  - Fn::Sub: "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/rc-lambda-base-cache"
+                  Fn::Sub: "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/rc-lambda-base"
               - Sid: PublishLambdaBaseDigest
                 Effect: Allow
                 Action:

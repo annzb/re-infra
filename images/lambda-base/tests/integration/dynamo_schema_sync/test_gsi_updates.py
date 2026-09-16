@@ -1,4 +1,5 @@
 """GSI updates that do NOT require a table recreate."""
+
 from __future__ import annotations
 
 import pytest
@@ -86,9 +87,7 @@ def test_missing_and_remote_only_gsis_reconciled_when_delete_enabled(managed_tab
     )
     dh.put_items(name, [{"pk": "a", "gsi_a": "x", "obsolete": "o"}])
 
-    apply = run_schema_sync(
-        tables="reconcile_gsi_table", apply=True, extra_env=PRUNE_ENV
-    )
+    apply = run_schema_sync(tables="reconcile_gsi_table", apply=True, extra_env=PRUNE_ENV)
     assert apply.returncode == 0, output(apply)
     assert set(dh.describe_schema(name)["gsis"]) == {"GSI-A"}
     assert {i["pk"] for i in dh.scan_items(name)} == {"a"}
@@ -124,9 +123,7 @@ def test_live_composite_gsi_sort_key_is_ignored_when_expected_sort_key_unmodeled
     assert dh.list_dump_objects(dump_bucket, name) == []
 
 
-def test_changed_gsi_partition_key_rebuilt_in_place_ungated(
-    managed_table, dump_bucket
-):
+def test_changed_gsi_partition_key_rebuilt_in_place_ungated(managed_table, dump_bucket):
     name = managed_table(sc.changed_gsi_pk_table)
     dh.create_live_table(
         name,
@@ -180,9 +177,7 @@ def test_changed_gsi_sort_key_rebuilt_in_place_ungated(managed_table, dump_bucke
     assert second.returncode == 0, output(second)
 
 
-def test_changed_missing_and_remote_only_gsis_reconciled_in_one_apply(
-    managed_table, dump_bucket
-):
+def test_changed_missing_and_remote_only_gsis_reconciled_in_one_apply(managed_table, dump_bucket):
     # Ordering test: remote-only delete, changed rebuild and missing create must
     # all succeed in a single run without tripping DynamoDB's index constraints.
     name = managed_table(sc.reconcile_all_gsi_table)
@@ -286,7 +281,11 @@ def test_rebuild_inherits_unmodeled_projection_instead_of_widening_to_all(
         name,
         {"partition_key": "pk", "sort_key": None},
         gsis={
-            "GSI1-Test": {"partition_key": "old_gsi_pk", "sort_key": None, "projection": "KEYS_ONLY"}
+            "GSI1-Test": {
+                "partition_key": "old_gsi_pk",
+                "sort_key": None,
+                "projection": "KEYS_ONLY",
+            }
         },
     )
     dh.put_items(name, [{"pk": "a", "gsi_pk": "g", "old_gsi_pk": "o"}])

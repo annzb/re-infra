@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import Hashable
-from datetime import datetime, timezone
+from collections.abc import Hashable, Mapping
+from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, TypeVar, Union
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
-KeyType = Union[Hashable, tuple[Hashable, Hashable]]
+KeyType = Hashable | tuple[Hashable, Hashable]
 
-_GSI_SCHEMA_KEYS = frozenset({'partition_key', 'sort_key', 'projection', 'non_key_attributes'})
-_PROJECTION_TYPES = frozenset({'ALL', 'KEYS_ONLY', 'INCLUDE'})
+_GSI_SCHEMA_KEYS = frozenset({"partition_key", "sort_key", "projection", "non_key_attributes"})
+_PROJECTION_TYPES = frozenset({"ALL", "KEYS_ONLY", "INCLUDE"})
 
 
 class BaseItem(BaseModel):
     partition_key: ClassVar[str]
-    sort_key: ClassVar[Optional[str]] = None
+    sort_key: ClassVar[str | None] = None
     # the declared order of gsis is the priority order when selecting an index
     gsis: ClassVar[Mapping[str, str]] = MappingProxyType({})
     # Full specs for GSIs the attr→index `gsis` mapping cannot express: composite
@@ -42,7 +42,7 @@ class BaseItem(BaseModel):
 
     @staticmethod
     def now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
@@ -51,18 +51,27 @@ class BaseItem(BaseModel):
         if cls is BaseItem:
             return
 
-        if not getattr(cls, 'partition_key', None):
-            raise TypeError(f'{cls.__name__} must define partition_key')
+        if not getattr(cls, "partition_key", None):
+            raise TypeError(f"{cls.__name__} must define partition_key")
 
         if cls.partition_key not in cls.model_fields:
-            raise TypeError(f'{cls.__name__}.partition_key={cls.partition_key!r} does not match any model field')
+            raise TypeError(
+                f"{cls.__name__}.partition_key={cls.partition_key!r} does not match any model field"
+            )
 
         if cls.sort_key is not None and cls.sort_key not in cls.model_fields:
-            raise TypeError(f'{cls.__name__}.sort_key={cls.sort_key!r} does not match any model field')
+            raise TypeError(
+                f"{cls.__name__}.sort_key={cls.sort_key!r} does not match any model field"
+            )
 
-        invalid_gsi_fields = [field_name for field_name in cls.gsis if field_name not in cls.model_fields]
+        invalid_gsi_fields = [
+            field_name for field_name in cls.gsis if field_name not in cls.model_fields
+        ]
         if invalid_gsi_fields:
-            raise TypeError(f'{cls.__name__}.gsis contains fields that do not exist on the model: {invalid_gsi_fields}')
+            raise TypeError(
+                f"{cls.__name__}.gsis contains fields that do not exist on the "
+                f"model: {invalid_gsi_fields}"
+            )
         cls.gsis = MappingProxyType(dict(cls.gsis))
 
         for index_name, gsi_schema in cls.gsi_schemas.items():
@@ -72,52 +81,58 @@ class BaseItem(BaseModel):
             unknown_keys = sorted(set(gsi_schema) - _GSI_SCHEMA_KEYS)
             if unknown_keys:
                 raise TypeError(
-                    f'{cls.__name__}.gsi_schemas[{index_name!r}] has unknown key(s) {unknown_keys}; '
-                    f'supported keys are {sorted(_GSI_SCHEMA_KEYS)}'
+                    f"{cls.__name__}.gsi_schemas[{index_name!r}] has unknown "
+                    f"key(s) {unknown_keys}; "
+                    f"supported keys are {sorted(_GSI_SCHEMA_KEYS)}"
                 )
 
-            if not gsi_schema.get('partition_key'):
-                raise TypeError(f'{cls.__name__}.gsi_schemas[{index_name!r}] must declare a partition_key')
+            if not gsi_schema.get("partition_key"):
+                raise TypeError(
+                    f"{cls.__name__}.gsi_schemas[{index_name!r}] must declare a partition_key"
+                )
             invalid_schema_fields = [
                 field_name
-                for field_name in (gsi_schema.get('partition_key'), gsi_schema.get('sort_key'))
+                for field_name in (gsi_schema.get("partition_key"), gsi_schema.get("sort_key"))
                 if field_name is not None and field_name not in cls.model_fields
             ]
             if invalid_schema_fields:
                 raise TypeError(
-                    f'{cls.__name__}.gsi_schemas[{index_name!r}] references fields that do not exist '
-                    f'on the model: {invalid_schema_fields}'
+                    f"{cls.__name__}.gsi_schemas[{index_name!r}] references fields "
+                    f"that do not exist "
+                    f"on the model: {invalid_schema_fields}"
                 )
 
-            projection = gsi_schema.get('projection')
+            projection = gsi_schema.get("projection")
             if projection is not None and projection not in _PROJECTION_TYPES:
                 raise TypeError(
-                    f'{cls.__name__}.gsi_schemas[{index_name!r}].projection={projection!r} '
-                    f'must be one of {sorted(_PROJECTION_TYPES)}'
+                    f"{cls.__name__}.gsi_schemas[{index_name!r}].projection={projection!r} "
+                    f"must be one of {sorted(_PROJECTION_TYPES)}"
                 )
 
-            non_key_attributes = gsi_schema.get('non_key_attributes')
-            if projection == 'INCLUDE' and not non_key_attributes:
+            non_key_attributes = gsi_schema.get("non_key_attributes")
+            if projection == "INCLUDE" and not non_key_attributes:
                 raise TypeError(
-                    f'{cls.__name__}.gsi_schemas[{index_name!r}] declares projection=INCLUDE '
-                    f'but no non_key_attributes'
+                    f"{cls.__name__}.gsi_schemas[{index_name!r}] declares projection=INCLUDE "
+                    f"but no non_key_attributes"
                 )
-            if non_key_attributes and projection != 'INCLUDE':
+            if non_key_attributes and projection != "INCLUDE":
                 raise TypeError(
-                    f'{cls.__name__}.gsi_schemas[{index_name!r}] declares non_key_attributes '
-                    f'but projection is {projection!r}, not INCLUDE'
+                    f"{cls.__name__}.gsi_schemas[{index_name!r}] declares non_key_attributes "
+                    f"but projection is {projection!r}, not INCLUDE"
                 )
             # Deliberately NOT requiring non_key_attributes to be model fields:
             # permissive models carry real attributes that are not declared, and
             # that rule would make adopting a live INCLUDE index impossible.
 
-        cls.gsi_schemas = MappingProxyType({
-            index_name: MappingProxyType(dict(gsi_schema))
-            for index_name, gsi_schema in cls.gsi_schemas.items()
-        })
+        cls.gsi_schemas = MappingProxyType(
+            {
+                index_name: MappingProxyType(dict(gsi_schema))
+                for index_name, gsi_schema in cls.gsi_schemas.items()
+            }
+        )
 
     @classmethod
-    def key_fields(cls) -> List[str]:
+    def key_fields(cls) -> list[str]:
         fields = [cls.partition_key]
         if cls.sort_key:
             fields.append(cls.sort_key)
@@ -138,8 +153,8 @@ class BaseItem(BaseModel):
         sk_value = getattr(self, self.sort_key)
         return (pk_value, sk_value)
 
-    def to_dict(self, *, exclude_none: bool = True) -> Dict[str, Any]:
-        return self.model_dump(mode='python', exclude_none=exclude_none)
+    def to_dict(self, *, exclude_none: bool = True) -> dict[str, Any]:
+        return self.model_dump(mode="python", exclude_none=exclude_none)
 
     # def to_json(self, *, exclude_none: bool = True) -> Dict[str, Any]:
     #     return self.model_dump(mode='json', exclude_none=exclude_none)

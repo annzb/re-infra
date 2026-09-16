@@ -32,13 +32,12 @@ packages = ["src/rc_lambda_base"]
 testpaths = ["tests/unit"]
 
 [tool.ruff]
-line-length = 120
+line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B"]
-ignore = ["E501"]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.mypy]
 python_version = "3.11"

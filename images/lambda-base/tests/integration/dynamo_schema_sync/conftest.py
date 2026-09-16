@@ -4,8 +4,10 @@ These tests intentionally create, delete, and recreate DynamoDB tables, so they
 must only ever run against a local LocalStack endpoint. The guard below refuses
 to run otherwise.
 """
+
 from __future__ import annotations
 
+import contextlib
 import os
 from uuid import uuid4
 
@@ -16,15 +18,10 @@ import pytest
 # so these module-level side effects run first and every table name (and every
 # migration subprocess, which inherits os.environ) resolves consistently. ──
 os.environ.setdefault("DYNAMO_SCHEMA_TEST_RUN_ID", uuid4().hex[:8])
-os.environ.setdefault(
-    "DYNAMO_SCHEMA_MODULE", "tests.integration.dynamo_schema_sync.schema_cases"
-)
+os.environ.setdefault("DYNAMO_SCHEMA_MODULE", "tests.integration.dynamo_schema_sync.schema_cases")
 os.environ.setdefault("DYNAMO_SCHEMA_POLL_SECONDS", "1")
-# Written to the Environment tag; --apply requires it.
-os.environ.setdefault("RC_ENVIRONMENT", "schema-sync-test")
-DUMP_BUCKET = os.environ.setdefault(
-    "DYNAMO_SCHEMA_DUMP_BUCKET", "rc-local-schema-sync-test-dumps"
-)
+os.environ.setdefault("DYNAMO_SCHEMA_TEST_PREFIX", "rc-local-schema-sync-test")
+DUMP_BUCKET = os.environ.setdefault("DYNAMO_SCHEMA_DUMP_BUCKET", "rc-local-schema-sync-test-dumps")
 
 
 def _assert_safe_local_environment() -> None:
@@ -41,8 +38,9 @@ def _assert_safe_local_environment() -> None:
     )
 
 
-# Fail collection immediately if the environment is unsafe.
-_assert_safe_local_environment()
+def pytest_collection(session: pytest.Session) -> None:
+    """Refuse to collect this suite unless it targets LocalStack."""
+    _assert_safe_local_environment()
 
 
 def table_prefix() -> str:
@@ -97,7 +95,6 @@ def managed_table():
     yield _manage
 
     for name in names:
-        try:
+        # Best-effort cleanup: the test may already have deleted the table.
+        with contextlib.suppress(Exception):
             dh.delete_table(name)
-        except Exception:  # noqa: BLE001 - best-effort cleanup
-            pass

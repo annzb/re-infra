@@ -4,6 +4,7 @@ The governing rule under test: `None` in a declaration means "not modeled --
 do not enforce, inherit what is live", and such gaps surface as UNDECLARED
 findings whose only remedy is a human editing the Python.
 """
+
 import pytest
 
 from rc_lambda_base.dynamo.schema_diff import (
@@ -137,18 +138,24 @@ def test_live_user_table_shape_produces_no_conflicts():
     # Regression for the real rc-*-users estate: three composite indexes and a
     # KEYS_ONLY projection, all declared HASH-only via the shorthand. This must
     # stay report-only or every deploy breaks.
-    declared = schema(gsis={
-        "GSI1-Email": gsi("email"),
-        "GSI2-EntityType": gsi("EntityType"),
-        "GSI3-NameToken": gsi("nameTokenPartition"),
-        "GSI4-ReferralCommission": gsi("commissionReferrerId"),
-    })
-    live = schema(gsis={
-        "GSI1-Email": gsi("email", None, "ALL"),
-        "GSI2-EntityType": gsi("EntityType", "CreatedAt", "ALL"),
-        "GSI3-NameToken": gsi("nameTokenPartition", "nameToken", "KEYS_ONLY"),
-        "GSI4-ReferralCommission": gsi("commissionReferrerId", "commissionStatusMaturity", "ALL"),
-    })
+    declared = schema(
+        gsis={
+            "GSI1-Email": gsi("email"),
+            "GSI2-EntityType": gsi("EntityType"),
+            "GSI3-NameToken": gsi("nameTokenPartition"),
+            "GSI4-ReferralCommission": gsi("commissionReferrerId"),
+        }
+    )
+    live = schema(
+        gsis={
+            "GSI1-Email": gsi("email", None, "ALL"),
+            "GSI2-EntityType": gsi("EntityType", "CreatedAt", "ALL"),
+            "GSI3-NameToken": gsi("nameTokenPartition", "nameToken", "KEYS_ONLY"),
+            "GSI4-ReferralCommission": gsi(
+                "commissionReferrerId", "commissionStatusMaturity", "ALL"
+            ),
+        }
+    )
 
     diff = diff_schemas(declared, live)
 
@@ -156,10 +163,10 @@ def test_live_user_table_shape_produces_no_conflicts():
     assert diff.actionable(NONE_GRANTED) == ()
     assert diff.blocked(NONE_GRANTED) == ()
     assert kinds(diff) == [
-        FindingKind.UNDECLARED_SORT_KEY,   # GSI2
-        FindingKind.UNDECLARED_SORT_KEY,   # GSI3
-        FindingKind.UNDECLARED_PROJECTION, # GSI3 KEYS_ONLY
-        FindingKind.UNDECLARED_SORT_KEY,   # GSI4
+        FindingKind.UNDECLARED_SORT_KEY,  # GSI2
+        FindingKind.UNDECLARED_SORT_KEY,  # GSI3
+        FindingKind.UNDECLARED_PROJECTION,  # GSI3 KEYS_ONLY
+        FindingKind.UNDECLARED_SORT_KEY,  # GSI4
     ]
     # Reported, but the deploy has nothing to do -- so it must exit clean.
     assert diff.requires_action(NONE_GRANTED) is False
@@ -283,6 +290,8 @@ def test_resolve_projection_defaults_to_all_for_a_brand_new_index():
     assert resolve_projection(gsi("a", projection=None), None) == {"ProjectionType": "ALL"}
 
 
-@pytest.mark.parametrize("value,expected", [(None, None), ([], frozenset()), (["b", "a"], frozenset({"a", "b"}))])
+@pytest.mark.parametrize(
+    "value,expected", [(None, None), ([], frozenset()), (["b", "a"], frozenset({"a", "b"}))]
+)
 def test_normalize_non_key_attributes(value, expected):
     assert normalize_non_key_attributes(value) == expected

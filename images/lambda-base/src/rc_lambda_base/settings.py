@@ -3,12 +3,13 @@
 Deliberately small: only what the generic DynamoDB framework needs. Application
 settings stay in the application.
 """
+
 from __future__ import annotations
 
 import math
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping, Optional
 
 DEFAULT_REGION = "us-east-1"
 
@@ -24,7 +25,7 @@ class SettingsError(ValueError):
     """An environment variable holds a value the package cannot use."""
 
 
-def _raw(environ: Mapping[str, str], name: str) -> Optional[str]:
+def _raw(environ: Mapping[str, str], name: str) -> str | None:
     value = environ.get(name)
     if value is None:
         return None
@@ -61,7 +62,7 @@ def parse_positive_float(environ: Mapping[str, str], name: str, default: float) 
 @dataclass(frozen=True)
 class Settings:
     aws_region: str = DEFAULT_REGION
-    aws_endpoint_url: Optional[str] = None
+    aws_endpoint_url: str | None = None
     # Table/GSI polling interval. LocalStack converges near-instantly, so local
     # integration tests drop this to 1s.
     schema_poll_seconds: float = 10.0
@@ -71,7 +72,7 @@ class Settings:
     allow_table_recreate: bool = False
 
     @classmethod
-    def from_env(cls, environ: Optional[Mapping[str, str]] = None) -> "Settings":
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
         env = os.environ if environ is None else environ
 
         stale = sorted(name for name in LEGACY_ENV_VARS if _raw(env, name))
@@ -86,7 +87,9 @@ class Settings:
             aws_region=_raw(env, "AWS_REGION") or _raw(env, "AWS_DEFAULT_REGION") or DEFAULT_REGION,
             aws_endpoint_url=_raw(env, "AWS_ENDPOINT_URL"),
             schema_poll_seconds=parse_positive_float(env, "DYNAMO_SCHEMA_POLL_SECONDS", 10.0),
-            schema_wait_timeout_seconds=parse_positive_float(env, "DYNAMO_SCHEMA_WAIT_TIMEOUT_SECONDS", 3600.0),
+            schema_wait_timeout_seconds=parse_positive_float(
+                env, "DYNAMO_SCHEMA_WAIT_TIMEOUT_SECONDS", 3600.0
+            ),
             prune_undeclared=parse_bool(env, "DYNAMO_PRUNE_UNDECLARED", False),
             allow_table_recreate=parse_bool(env, "DYNAMO_ALLOW_TABLE_RECREATE", False),
         )

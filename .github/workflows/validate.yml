@@ -1,7 +1,8 @@
-name: CI
+name: Validate infrastructure
 
-# Checks every pull request and shows the infrastructure plan in the run summary.
-# Never applies anything: the plan role cannot execute change sets.
+# Pull request checks for the rc-infra tool, the templates, and the catalog, plus the
+# plan of what merging would change in AWS. Applies nothing: the plan role is denied
+# executing change sets. Applying happens in deploy.yml, on main.
 
 on:
   pull_request:
@@ -11,15 +12,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: validate-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   AWS_REGION: us-east-1
 
 jobs:
-  tool:
-    name: rc-infra checks
+  checks:
+    name: Lint, test, validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -47,12 +48,12 @@ jobs:
 
       - name: Validate templates and catalog
         run: |
-          uv run cfn-lint infrastructure/*/template.yaml
+          uv run cfn-lint infra/*.yaml
           uv run rc-infra validate
 
   plan:
     name: Infrastructure plan
-    needs: tool
+    needs: checks
     # OIDC tokens are not issued to pull requests from forks.
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest

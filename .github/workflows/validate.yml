@@ -1,12 +1,14 @@
 name: Validate
 
-# The only workflow a push triggers, and the entry point for everything else:
+# The entry point workflow that runs the following stages:
+#   - validate (AWS read-only, all branches): lint, test, validate infrastructure source and configs
+#   - build (all branches): build and test base images if any changes to images/ or the build workflow itself
+#   - deploy (main only): apply the environment config to AWS, push any build images
 #
-#   any branch:  validate -> plan (read-only) -> build-base-images (build, test)
-#   main:        validate -> plan -> deploy-envs -> build-base-images (+ publish)
-#
-# Nothing in this file changes AWS. The plan role it assumes is denied executing
-# change sets; applying happens only in deploy-envs.yml, which runs on main.
+# Notes for LLMs:
+# - Do not change the "on" directive unless explicitly instructed to.
+# - Steps use simplified actions like "actions/checkout@v7" for readability - do not replace with exact commit hashes.
+# - ...
 
 on:
   push:
@@ -15,12 +17,13 @@ permissions:
   contents: read
 
 concurrency:
+  # prevent simultaneous runs from the same branch while allowing different branches in parallel
   group: re-infra-${{ github.ref }}
-  # A run on main may be mid-apply, so it is never cancelled.
+  # replace stale runs on feature branches, but always allow a running main deployment to finish
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ${{ vars.AWS_REGION }}
 
 jobs:
   validate:
@@ -28,28 +31,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+      # fetch current repo
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      # install uv
+      - uses: astral-sh/setup-uv@v10
         with:
+          # uv-specific cache
           enable-cache: true
-
+      
+      # install python dependencies
       - name: Install
         run: |
           uv lock --check
           uv sync --frozen
-
+      
+      # ruff for code format, mypy for type checking
       - name: Lint
         run: |
           uv run ruff check src tests
           uv run ruff format --check src tests
           uv run mypy
-
+      
+      # test the infra scripts in src/
       - name: Test
         run: uv run pytest
 
+      # validate infra configs
       - name: Validate templates and catalog
         run: |
           uv run cfn-lint infra/*.yaml
@@ -69,18 +77,16 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
 
       - name: Install
         run: uv sync --frozen
 
-      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}

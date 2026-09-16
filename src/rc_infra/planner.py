@@ -1,12 +1,10 @@
 """Compare the config with AWS and decide what `apply` would do. Never mutates anything.
 
-Creating and discarding a change set to preview an update is the only write; the
-plan role is allowed to do that but denied executing one.
+Creating and discarding a change set to preview an update is the only write.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -63,16 +61,6 @@ class Action:
     # The existing stack must be deleted first (its creation rolled back).
     replace_failed_stack: bool = False
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind.value,
-            "target": self.target,
-            "stack": self.stack,
-            "details": list(self.details),
-            "imports": [{"logical_id": lid, "bucket": name} for lid, name in self.imports],
-            "replace_failed_stack": self.replace_failed_stack,
-        }
-
 
 @dataclass(frozen=True)
 class Plan:
@@ -85,12 +73,6 @@ class Plan:
 
     def of_kind(self, kind: ActionKind) -> list[Action]:
         return [a for a in self.actions if a.kind is kind]
-
-    def to_json(self) -> str:
-        return json.dumps(
-            {"actions": [a.to_dict() for a in self.actions], "notes": list(self.notes)},
-            indent=2,
-        )
 
 
 def build_plan(config: EnvConfig, aws: Aws) -> Plan:
@@ -219,6 +201,12 @@ def _plan_removed_environments(config: EnvConfig, aws: Aws) -> tuple[list[Action
 
 def render_text(plan: Plan) -> str:
     lines = []
+    # The destructive case must be impossible to miss in a job log.
+    deletions = plan.of_kind(ActionKind.DELETE)
+    if deletions:
+        names = ", ".join(action.target for action in deletions)
+        lines.append(f"WARNING: applying deletes {len(deletions)} environment(s): {names}, including their data.")
+        lines.append("")
     for action in plan.actions:
         lines.append(f"{action.kind.value:<8} {action.target:<12} {action.stack}")
         lines.extend(f"         - import {lid} ({name})" for lid, name in action.imports)
@@ -227,33 +215,6 @@ def render_text(plan: Plan) -> str:
         lines.extend(f"         - {detail}" for detail in action.details)
     lines.extend(f"note: {note}" for note in plan.notes)
     lines.append(_summary(plan))
-    return "\n".join(lines)
-
-
-def render_markdown(plan: Plan) -> str:
-    lines = ["## Infrastructure plan", ""]
-    if plan.blocked:
-        lines.append(f"> [!CAUTION]\n> **{len(plan.blocked)} blocked** — apply will refuse to run.")
-        lines.append("")
-    deletions = plan.of_kind(ActionKind.DELETE)
-    if deletions:
-        names = ", ".join(f"`{a.target}`" for a in deletions)
-        lines.append(f"> [!WARNING]\n> **Merging deletes {len(deletions)} environment(s): {names}**, including their data.")
-        lines.append("")
-    lines.extend(["| Action | Target | Stack |", "|---|---|---|"])
-    lines.extend(f"| {a.kind.value} | `{a.target}` | `{a.stack}` |" for a in plan.actions)
-    for action in plan.actions:
-        bullets = [f"import `{lid}` (`{name}`)" for lid, name in action.imports]
-        if action.replace_failed_stack:
-            bullets.append("delete the rolled-back stack first")
-        bullets.extend(action.details)
-        if bullets:
-            lines.extend(["", f"### {action.kind.value} `{action.target}`", ""])
-            lines.extend(f"- {bullet}" for bullet in bullets)
-    if plan.notes:
-        lines.extend(["", "### Notes", ""])
-        lines.extend(f"- {note}" for note in plan.notes)
-    lines.extend(["", _summary(plan)])
     return "\n".join(lines)
 
 

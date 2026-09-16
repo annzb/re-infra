@@ -4,7 +4,7 @@ from typing import Any
 
 from rc_infra.aws import ResourceChange
 from rc_infra.env_config import EnvConfig
-from rc_infra.planner import Action, ActionKind, Plan, build_plan, render_markdown, render_text
+from rc_infra.planner import Action, ActionKind, Plan, build_plan, render_text
 from tests.fakes import (
     FakeAws,
     add_removed_environment,
@@ -127,7 +127,7 @@ def test_removed_environment_is_deleted(env_config: EnvConfig, fake: FakeAws) ->
     assert action.details.index("delete stack rc-env-preview42") > max(
         i for i, d in enumerate(action.details) if d.startswith("empty and delete bucket")
     )
-    assert "Merging deletes 1 environment(s): `preview42`" in render_markdown(plan)
+    assert render_text(plan).startswith("WARNING: applying deletes 1 environment(s): preview42, including their data.")
     assert fake.events == []
 
 
@@ -159,4 +159,6 @@ def test_blocked_and_deleted_are_listed_first(env_config: EnvConfig, fake: FakeA
     kinds = [action.kind for action in plan.actions]
 
     assert kinds[:2] == [ActionKind.BLOCKED, ActionKind.DELETE]
-    assert render_text(plan).splitlines()[0].startswith("BLOCKED  dev")
+    lines = render_text(plan).splitlines()
+    assert lines[0].startswith("WARNING: applying deletes 1 environment(s): preview42")
+    assert lines[2].startswith("BLOCKED  dev")

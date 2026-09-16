@@ -1,0 +1,44 @@
+name: Non-main
+
+# The entry point for pushes to every branch except main. Read-only stages only:
+#   1. validate.yml           lint, test, validate the source and configs (no AWS access)
+#   2. build-base-images.yml  build and test the Lambda base image, never publish it
+#
+# Nothing here reaches AWS. Deployment happens only in main.yml.
+#
+# Notes for LLMs:
+# - Do not change the "on" directive unless explicitly instructed to. Together with
+#   main.yml's "branches: [main]", "branches-ignore" splits pushes so that exactly one
+#   of the two entry points runs.
+# - The concurrency group must stay different from the group of every workflow called
+#   below. An identical group is detected as a deadlock and cancels the run.
+# - A job with "uses" accepts only name, uses, with, secrets, strategy, needs, if,
+#   concurrency and permissions. It cannot carry env, runs-on, timeout-minutes or defaults.
+# - ...
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # one pipeline per branch; replace stale runs on the same branch
+  group: re-infra-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    # Deleting a branch is also a push, but one whose diff is meaningless: "before" is
+    # the deleted tip while the run's SHA reverts to the default branch.
+    if: ${{ !github.event.deleted }}
+    uses: ./.github/workflows/validate.yml
+
+  build-base-images:
+    if: ${{ !github.event.deleted }}
+    needs: validate
+    # deliberately no id-token: the publish job never runs off main
+    uses: ./.github/workflows/build-base-images.yml
+    with:
+      publish: false

@@ -7,7 +7,8 @@ name: Deploy environments
 # It never deploys an application. The rc-app-<name> stacks belong to
 # retribalize-core, which reads what this publishes under /rc/env/<name>/.
 #
-# Called by validate.yml, for main only, after validation and the plan pass.
+# Called by main.yml only, after validate.yml passes. `apply` prints the plan it is
+# about to run, so the job log always records what changed.
 
 on:
   workflow_call:
@@ -21,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ${{ vars.AWS_REGION }}
 
 jobs:
   apply:
@@ -32,7 +33,7 @@ jobs:
       contents: read
       id-token: write
     env:
-      RC_INFRA_CFN_ROLE_ARN: ${{ vars.AWS_CFN_EXEC_ROLE_ARN }}
+      RC_INFRA_CFN_ROLE_ARN: ${{ vars.AWS_ROLE_CFN }}
     defaults:
       run:
         shell: bash
@@ -48,8 +49,8 @@ jobs:
       - name: Install
         run: uv sync --frozen
 
-      # The full suite already ran in the calling workflow's validate job; this is
-      # the cheap last check that what is about to be applied is well formed.
+      # The full suite already ran in validate.yml; this is the cheap last check that
+      # what is about to be applied is well formed.
       - name: Validate templates and environment config
         run: |
           uv run cfn-lint infra/*.yaml
@@ -57,12 +58,9 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_ROLE_GITHUB }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Recorded in the run summary, then applied. Refuses to apply anything BLOCKED.
-      - name: Plan
-        run: uv run rc-infra plan --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
-
+      # Prints the plan, refuses it if anything is BLOCKED, then applies it.
       - name: Apply
         run: uv run rc-infra apply --yes

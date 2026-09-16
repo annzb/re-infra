@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -36,15 +35,11 @@ def test_usage_error() -> None:
     assert caught.value.code == 2
 
 
-def test_plan_json(connected: FakeAws, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["plan", "--format", "json"]) == 0
-    actions = json.loads(capsys.readouterr().out)["actions"]
-    assert {a["kind"] for a in actions} == {"CREATE"}
-
-
-def test_blocked_plan_exits_nonzero(connected: FakeAws) -> None:
+def test_blocked_plan_is_never_applied(connected: FakeAws) -> None:
     connected.stacks.add("rc-env-dev", status="UPDATE_ROLLBACK_FAILED", tags=env_stack_tags("dev"))
-    assert main(["plan", "--format", "markdown"]) == 1
+    assert main(["apply"]) == 1
+    assert main(["apply", "--yes"]) == 1
+    assert connected.stacks.deploys == []
 
 
 def test_wrong_account_is_refused(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

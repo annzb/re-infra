@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Retribalize infrastructure bootstrap (stack rc-bootstrap): IAM roles that let
-  GitHub Actions in the re-infra repository plan and apply infrastructure.
+  GitHub Actions in the re-infra repository apply infrastructure.
   Deployed manually, once, by an administrator (see README.md "One-time setup").
 
 Parameters:
@@ -64,94 +64,12 @@ Resources:
                 Resource:
                   Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/rc-app-*"
 
-  # Pull requests and main: read state and create (never execute) change sets.
-  PlanRole:
+  # The only role GitHub Actions assumes, and only from main: apply stacks, tear down
+  # removed environments, publish the base image. Off main the workflows never touch AWS.
+  GitHubRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: rc-infra-plan
-      MaxSessionDuration: 3600
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Federated:
-                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
-            Action: sts:AssumeRoleWithWebIdentity
-            Condition:
-              StringEquals:
-                token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              StringLike:
-                token.actions.githubusercontent.com:sub:
-                  # Any branch: validate.yml plans on every push. The Deny below is what
-                  # keeps that harmless -- this role can never execute a change set.
-                  - Fn::Sub: "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/*"
-      Policies:
-        - PolicyName: plan
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: ReadStacks
-                Effect: Allow
-                Action:
-                  - cloudformation:DescribeStacks
-                  - cloudformation:DescribeStackResources
-                  - cloudformation:ListStacks
-                  - cloudformation:ListStackResources
-                  - cloudformation:GetTemplate
-                  - cloudformation:ValidateTemplate
-                Resource: "*"
-              - Sid: PreviewChangeSets
-                Effect: Allow
-                Action:
-                  - cloudformation:CreateChangeSet
-                  - cloudformation:DescribeChangeSet
-                  - cloudformation:DeleteChangeSet
-                Resource:
-                  - Fn::Sub: "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rc-env-*/*"
-                  - Fn::Sub: "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rc-platform/*"
-              - Sid: NeverExecute
-                Effect: Deny
-                Action:
-                  - cloudformation:ExecuteChangeSet
-                  - cloudformation:DeleteStack
-                  - cloudformation:UpdateStack
-                  - cloudformation:CreateStack
-                Resource: "*"
-              - Sid: PassExecutionRole
-                Effect: Allow
-                Action: iam:PassRole
-                Resource:
-                  Fn::GetAtt: [CloudFormationExecutionRole, Arn]
-              - Sid: ReadBucketConfiguration
-                Effect: Allow
-                Action:
-                  - s3:ListBucket
-                  - s3:GetBucketTagging
-                  - s3:GetBucketVersioning
-                  - s3:GetBucketCORS
-                  - s3:GetBucketPublicAccessBlock
-                  - s3:GetBucketOwnershipControls
-                  - s3:GetEncryptionConfiguration
-                  - s3:GetLifecycleConfiguration
-                Resource: "arn:aws:s3:::rc-*"
-              - Sid: ReadTables
-                Effect: Allow
-                Action:
-                  - dynamodb:DescribeTable
-                  - dynamodb:ListTagsOfResource
-                Resource:
-                  Fn::Sub: "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rc-*"
-              - Sid: ListTables
-                Effect: Allow
-                Action: dynamodb:ListTables
-                Resource: "*"
-
-  # main only: apply stacks, tear down removed environments, publish the base image.
-  DeployRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: rc-infra-deploy
+      RoleName: rc-infra-github
       MaxSessionDuration: 7200
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -167,7 +85,7 @@ Resources:
                 token.actions.githubusercontent.com:sub:
                   Fn::Sub: "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
       Policies:
-        - PolicyName: deploy
+        - PolicyName: github
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -291,15 +209,11 @@ Resources:
                   Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/rc/lambda-base/*"
 
 Outputs:
-  PlanRoleArn:
-    Description: Repository variable AWS_PLAN_ROLE_ARN
+  GitHubRoleArn:
+    Description: Repository variable AWS_ROLE_GITHUB
     Value:
-      Fn::GetAtt: [PlanRole, Arn]
-  DeployRoleArn:
-    Description: Repository variable AWS_DEPLOY_ROLE_ARN
-    Value:
-      Fn::GetAtt: [DeployRole, Arn]
+      Fn::GetAtt: [GitHubRole, Arn]
   CloudFormationExecutionRoleArn:
-    Description: Repository variable AWS_CFN_EXEC_ROLE_ARN
+    Description: Repository variable AWS_ROLE_CFN
     Value:
       Fn::GetAtt: [CloudFormationExecutionRole, Arn]

@@ -1,8 +1,7 @@
-"""rc-infra: validate the environment config, plan changes, and apply them.
+"""rc-infra: validate the environment config and apply it.
 
-    rc-infra validate                  config only, no AWS access
-    rc-infra plan [--format FORMAT]    read AWS and show what apply would do
-    rc-infra apply [--yes]             carry out the plan (prints it and stops without --yes)
+    rc-infra validate           config only, no AWS access
+    rc-infra apply [--yes]      show what AWS is missing, then carry it out with --yes
 
 Exit codes: 0 success, 1 invalid config / blocked plan / failed apply, 2 usage error.
 """
@@ -18,7 +17,7 @@ from pathlib import Path
 from rc_infra import aws as aws_module
 from rc_infra.apply import ApplyRefused, apply_plan
 from rc_infra.env_config import DEFAULT_ENVS_PATH, EnvConfig, EnvConfigError, load_env_config
-from rc_infra.planner import build_plan, render_markdown, render_text
+from rc_infra.planner import build_plan, render_text
 
 CFN_ROLE_ENV = "RC_INFRA_CFN_ROLE_ARN"
 
@@ -45,11 +44,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     aws = aws_module.connect(config.region, args.cfn_role_arn)
     plan = build_plan(config, aws)
-
-    if args.command == "plan":
-        rendered = {"text": render_text, "markdown": render_markdown}.get(args.format)
-        print(rendered(plan) if rendered else plan.to_json())
-        return 1 if plan.blocked else 0
 
     print(render_text(plan))
     if not args.yes:
@@ -83,9 +77,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rc-infra", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("validate", parents=[common], help="validate the config")
-    plan = commands.add_parser("plan", parents=[common, aws_options], help="show planned changes")
-    plan.add_argument("--format", choices=["text", "markdown", "json"], default="text")
-    apply = commands.add_parser("apply", parents=[common, aws_options], help="apply the plan")
+    apply = commands.add_parser("apply", parents=[common, aws_options], help="apply the config to AWS")
     apply.add_argument("--yes", action="store_true", help="actually apply")
     return parser
 

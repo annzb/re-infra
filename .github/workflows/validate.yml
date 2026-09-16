@@ -1,29 +1,19 @@
 name: Validate
 
-# The entry point workflow that runs the following stages:
-#   - validate (AWS read-only, all branches): lint, test, validate infrastructure source and configs
-#   - build (all branches): build and test base images if any changes to images/ or the build workflow itself
-#   - deploy (main only): apply the environment config to AWS, push any build images
+# Lint, test, and validate the infrastructure source and configs.
+# Called by entrypoint workflows main.yml and non-main.yml.
 #
 # Notes for LLMs:
-# - Do not change the "on" directive unless explicitly instructed to.
+# - "on: workflow_call" is intended here - it is not an entrypoint workflow.
+# - Do not add a "concurrency" block.
 # - Steps use simplified actions like "actions/checkout@v7" for readability - do not replace with exact commit hashes.
 # - ...
 
 on:
-  push:
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  # prevent simultaneous runs from the same branch while allowing different branches in parallel
-  group: re-infra-${{ github.ref }}
-  # replace stale runs on feature branches, but always allow a running main deployment to finish
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
-env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
 
 jobs:
   validate:
@@ -62,97 +52,3 @@ jobs:
         run: |
           uv run cfn-lint infra/*.yaml
           uv run rc-infra validate
-
-  plan:
-    name: Infrastructure plan (read-only)
-    needs: validate
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      RC_INFRA_CFN_ROLE_ARN: ${{ vars.AWS_CFN_EXEC_ROLE_ARN }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: astral-sh/setup-uv@v10
-        with:
-          enable-cache: true
-
-      - name: Install
-        run: uv sync --frozen
-
-      - uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      # Fails the run when anything is BLOCKED; DELETE is highlighted at the top.
-      - name: Plan
-        run: uv run rc-infra plan --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
-
-  changes:
-    name: Detect base-image changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      images: ${{ steps.check.outputs.images }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      # A called workflow cannot carry its own paths filter, so the caller decides
-      # whether a new base image is worth publishing.
-      - name: Check images/lambda-base
-        id: check
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          if [ -z "$BEFORE" ] ||
-             [ "$BEFORE" = "0000000000000000000000000000000000000000" ] ||
-             ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-            # New branch, or a commit this clone does not have: assume changed.
-            echo "images=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git diff --name-only "$BEFORE" "$GITHUB_SHA" |
-               grep -qE '^(images/lambda-base/|\.github/workflows/build-base-images\.yml$)'; then
-            echo "images=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "images=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  deploy-envs:
-    name: Deploy environments
-    needs: [validate, plan]
-    if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/deploy-envs.yml
-
-  build-base-images:
-    name: Base images
-    needs: [validate, plan, changes, deploy-envs]
-    # deploy-envs is skipped off main, which must not skip the image build.
-    if: >-
-      always()
-      && needs.validate.result == 'success'
-      && needs.plan.result == 'success'
-      && needs.changes.result == 'success'
-      && contains(fromJSON('["success", "skipped"]'), needs.deploy-envs.result)
-    permissions:
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/build-base-images.yml
-    with:
-      publish: ${{ github.ref == 'refs/heads/main' && needs.changes.outputs.images == 'true' }}

@@ -1,0 +1,51 @@
+name: Main
+
+# The entry point for pushes to main. It only calls other workflows, in this order:
+#   1. validate.yml           lint, test, validate the source and configs (no AWS access)
+#   2. deploy-envs.yml        apply envs.yaml to AWS - infrastructure only, never an app
+#   3. build-base-images.yml  build and test the Lambda base image, publish it when it changed
+#
+# Notes for LLMs:
+# - Do not change the "on" directive unless explicitly instructed to.
+# - The concurrency group must stay different from the group of every workflow called
+#   below. An identical group is detected as a deadlock and cancels the run.
+# - A job with "uses" accepts only name, uses, with, secrets, strategy, needs, if,
+#   concurrency and permissions. It cannot carry env, runs-on, timeout-minutes or defaults.
+# - id-token must be granted here, by the calling job. A called workflow can only
+#   downgrade these permissions, never raise them.
+# - ...
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # one pipeline per branch, and never cancel a deployment that is already running
+  group: re-infra-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    # deliberately no id-token: validation never touches AWS
+    uses: ./.github/workflows/validate.yml
+
+  deploy-envs:
+    needs: validate
+    permissions:
+      contents: read
+      # for AWS credentials
+      id-token: write
+    uses: ./.github/workflows/deploy-envs.yml
+
+  build-base-images:
+    # runs after the environments exist, so a published image always matches live infrastructure
+    needs: [validate, deploy-envs]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/build-base-images.yml
+    with:
+      publish: true

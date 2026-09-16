@@ -1,20 +1,21 @@
 name: Build base images
 
-# Builds the Lambda parent image, tests it, and publishes it only if those tests
-# pass. Called by validate.yml; publishing is requested only for main.
-#
+# Build the Lambda parent image and test it. 
+# Publish to ECR only if the tests pass and the image inputs actually changed.
+#   changes -> did images/lambda-base or this workflow change in the pushed commits?
 #   build   -> image tarball as a workflow artifact (no AWS access)
 #   test    -> suites against LocalStack + smoke tests on the built image
 #   publish -> ECR build tag, vulnerability scan, latest, SSM digest
 #
-# Because the image travels between jobs as an artifact, an untested image can
-# never reach ECR.
+# Called by main.yml with publish: true and by non-main.yml with publish: false, so
+# every branch still builds and tests the image. Because the image travels between
+# jobs as an artifact, an untested image can never reach ECR.
 
 on:
   workflow_call:
     inputs:
       publish:
-        description: Push the tested image to ECR. Only true for main.
+        description: Allow pushing the tested image to ECR. Only true for main.
         required: false
         default: false
         type: boolean
@@ -23,15 +24,52 @@ permissions:
   contents: read
 
 concurrency:
+  # distinct from the entry point's group: an identical group deadlocks the run
   group: build-base-images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ${{ vars.AWS_REGION }}
   ARTIFACT_NAME: rc-lambda-base-image
   IMAGE_TAG: rc-lambda-base:ci
 
 jobs:
+  changes:
+    name: Detect base-image changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.check.outputs.images }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Only a changed image is worth publishing. The github context inside a called
+      # workflow belongs to the caller, so this compares the commits that were pushed.
+      - name: Check images/lambda-base
+        id: check
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -z "$BEFORE" ] ||
+             [ "$BEFORE" = "0000000000000000000000000000000000000000" ] ||
+             ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # New branch, or a commit this clone does not have: assume changed.
+            echo "images=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$BEFORE" "$GITHUB_SHA" |
+               grep -qE '^(images/lambda-base/|\.github/workflows/build-base-images\.yml$)'; then
+            echo "images=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "images=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build image
     runs-on: ubuntu-latest
@@ -138,8 +176,10 @@ jobs:
 
   publish:
     name: Publish to ECR
-    needs: [build, test]
-    if: inputs.publish
+    needs: [changes, build, test]
+    # inputs.publish means "publishing is permitted here"; the filter decides whether
+    # there is anything new worth publishing.
+    if: inputs.publish && needs.changes.outputs.images == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -159,7 +199,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_ROLE_GITHUB }}
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: aws-actions/amazon-ecr-login@v2

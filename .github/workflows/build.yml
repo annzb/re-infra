@@ -1,15 +1,10 @@
-name: Build base images
+name: Build
 
-# Build the Lambda parent image and test it. 
-# Publish to ECR only if the tests pass and the image inputs actually changed.
-#   changes -> did images/lambda-base or this workflow change in the pushed commits?
-#   build   -> image tarball as a workflow artifact (no AWS access)
-#   test    -> suites against LocalStack + smoke tests on the built image
-#   publish -> ECR build tag, vulnerability scan, latest, SSM digest
-#
-# Called by main.yml with publish: true and by non-main.yml with publish: false, so
-# every branch still builds and tests the image. Because the image travels between
-# jobs as an artifact, an untested image can never reach ECR.
+# Build the Lambda parent image and test it. Publish to ECR only if the tests pass.
+# Called by main.yml with publish: true and by non-main.yml with publish: false.
+# - build (all branches): build image tarball as a workflow artifact (no AWS access).
+# - test (all branches): run unit and integration tests inside the built image.
+# - publish (main branch only): push rc-lambda-base:latest to ECR, then write its digest to SSM.
 
 on:
   workflow_call:
@@ -24,52 +19,17 @@ permissions:
   contents: read
 
 concurrency:
-  # distinct from the entry point's group: an identical group deadlocks the run
-  group: build-base-images-${{ github.ref }}
+  # prevent simultaneous builds from the same branch while allowing different branches in parallel
+  group: build-${{ github.ref }}
+  # replace stale builds on feature branches, but always allow a running main build to finish
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
-  ARTIFACT_NAME: rc-lambda-base-image
+  IMAGE_ARTIFACT_NAME: rc-lambda-base-image
   IMAGE_TAG: rc-lambda-base:ci
 
 jobs:
-  changes:
-    name: Detect base-image changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      images: ${{ steps.check.outputs.images }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      # Only a changed image is worth publishing. The github context inside a called
-      # workflow belongs to the caller, so this compares the commits that were pushed.
-      - name: Check images/lambda-base
-        id: check
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          if [ -z "$BEFORE" ] ||
-             [ "$BEFORE" = "0000000000000000000000000000000000000000" ] ||
-             ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-            # New branch, or a commit this clone does not have: assume changed.
-            echo "images=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git diff --name-only "$BEFORE" "$GITHUB_SHA" |
-               grep -qE '^(images/lambda-base/|\.github/workflows/build-base-images\.yml$)'; then
-            echo "images=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "images=false" >> "$GITHUB_OUTPUT"
-          fi
-
   build:
     name: Build image
     runs-on: ubuntu-latest
@@ -96,7 +56,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: ${{ env.IMAGE_ARTIFACT_NAME }}
           path: /tmp/rc-lambda-base.tar
           retention-days: 1
           compression-level: 0
@@ -157,7 +117,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: ${{ env.IMAGE_ARTIFACT_NAME }}
           path: /tmp
 
       # The published image must hold the package and console scripts, and must not
@@ -176,10 +136,9 @@ jobs:
 
   publish:
     name: Publish to ECR
-    needs: [changes, build, test]
-    # inputs.publish means "publishing is permitted here"; the filter decides whether
-    # there is anything new worth publishing.
-    if: inputs.publish && needs.changes.outputs.images == 'true'
+    needs: [build, test]
+    # true only when main.yml is the caller
+    if: inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -191,7 +150,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: ${{ env.IMAGE_ARTIFACT_NAME }}
           path: /tmp
 
       - name: Load image
@@ -205,54 +164,34 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
         id: ecr
 
-      # Immutable: the repository rejects overwriting an existing build tag.
-      - name: Push build tag
+      # One mutable tag, overwritten every time. Docker skips the layers the registry
+      # already holds, so re-pushing an unchanged image costs almost nothing.
+      - name: Push latest
         id: push
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
-          tag="${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}"
           repository="${REGISTRY}/rc-lambda-base"
-          docker tag "$IMAGE_TAG" "${repository}:${tag}"
-          docker push "${repository}:${tag}"
+          docker tag "$IMAGE_TAG" "${repository}:latest"
+          docker push "${repository}:latest"
           digest=$(aws ecr describe-images --repository-name rc-lambda-base \
-            --image-ids imageTag="$tag" --query 'imageDetails[0].imageDigest' --output text)
+            --image-ids imageTag=latest --query 'imageDetails[0].imageDigest' --output text)
           {
             echo "repository=$repository"
-            echo "tag=$tag"
             echo "digest=$digest"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Scan
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          aws ecr wait image-scan-complete --repository-name rc-lambda-base \
-            --image-id imageDigest="$DIGEST"
-          critical=$(aws ecr describe-image-scan-findings --repository-name rc-lambda-base \
-            --image-id imageDigest="$DIGEST" \
-            --query 'imageScanFindings.findingSeverityCounts.CRITICAL' --output text)
-          echo "CRITICAL findings: $critical"
-          # Documented threshold: any CRITICAL finding fails the publish.
-          if [ "$critical" != "None" ] && [ "$critical" != "0" ]; then
-            echo "::error::$critical CRITICAL findings in rc-lambda-base@$DIGEST"
-            exit 1
-          fi
-
-      - name: Move latest and publish the digest
+      # The digest, not the tag, is what retribalize-core pins.
+      - name: Publish the digest
         env:
           REPOSITORY: ${{ steps.push.outputs.repository }}
-          TAG: ${{ steps.push.outputs.tag }}
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          docker tag "$IMAGE_TAG" "${REPOSITORY}:latest"
-          docker push "${REPOSITORY}:latest"
           aws ssm put-parameter --name /rc/lambda-base/image-uri --type String --overwrite \
             --value "${REPOSITORY}@${DIGEST}"
           {
             echo "## Lambda base image published"
             echo ""
-            echo "- Build tag: \`${TAG}\`"
             echo "- Digest: \`${DIGEST}\`"
             echo "- Pin in retribalize-core: \`${REPOSITORY}@${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"

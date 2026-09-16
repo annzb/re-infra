@@ -4,8 +4,8 @@ Description: >
   the Lambda base image. Deployed by `rc-infra apply`.
 
 # The current base-image digest is published to SSM (/rc/lambda-base/image-uri)
-# by .github/workflows/build-base-images.yml, not by this stack, so every build
-# does not register as drift.
+# by .github/workflows/build.yml, not by this stack, so every build does not
+# register as drift.
 
 Resources:
   LambdaBaseRepository:

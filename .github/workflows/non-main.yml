@@ -2,7 +2,7 @@ name: Non-main
 
 # The entry point for pushes to every branch except main. Read-only stages only:
 #   1. validate.yml           lint, test, validate the source and configs (no AWS access)
-#   2. build-base-images.yml  build and test the Lambda base image, never publish it
+#   2. build.yml              build and test the Lambda base image, never publish it
 #
 # Nothing here reaches AWS. Deployment happens only in main.yml.
 #
@@ -35,10 +35,10 @@ jobs:
     if: ${{ !github.event.deleted }}
     uses: ./.github/workflows/validate.yml
 
-  build-base-images:
+  build:
     if: ${{ !github.event.deleted }}
     needs: validate
     # deliberately no id-token: the publish job never runs off main
-    uses: ./.github/workflows/build-base-images.yml
+    uses: ./.github/workflows/build.yml
     with:
       publish: false

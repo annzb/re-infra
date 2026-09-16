@@ -3,7 +3,7 @@ name: Main
 # The entry point for pushes to main. It only calls other workflows, in this order:
 #   1. validate.yml           lint, test, validate the source and configs (no AWS access)
 #   2. deploy-envs.yml        apply envs.yaml to AWS - infrastructure only, never an app
-#   3. build-base-images.yml  build and test the Lambda base image, publish it when it changed
+#   3. build.yml              build and test the Lambda base image, then publish it
 #
 # Notes for LLMs:
 # - Do not change the "on" directive unless explicitly instructed to.
@@ -40,12 +40,12 @@ jobs:
       id-token: write
     uses: ./.github/workflows/deploy-envs.yml
 
-  build-base-images:
+  build:
     # runs after the environments exist, so a published image always matches live infrastructure
     needs: [validate, deploy-envs]
     permissions:
       contents: read
       id-token: write
-    uses: ./.github/workflows/build-base-images.yml
+    uses: ./.github/workflows/build.yml
     with:
       publish: true

@@ -1,8 +1,8 @@
 name: Deploy environments
 
-# INFRASTRUCTURE ONLY. This applies environments/catalog.yaml to AWS: rc-platform,
-# one rc-env-<name> stack per catalog entry (created, imported, or updated), and
-# teardown of environments removed from the catalog.
+# INFRASTRUCTURE ONLY. This applies envs.yaml to AWS: rc-platform, one rc-env-<name>
+# stack per entry in it (created, imported, or updated), and teardown of environments
+# removed from it.
 #
 # It never deploys an application. The rc-app-<name> stacks belong to
 # retribalize-core, which reads what this publishes under /rc/env/<name>/.
@@ -25,7 +25,7 @@ env:
 
 jobs:
   apply:
-    name: Apply the environment catalog
+    name: Apply the environment config
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -37,11 +37,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
 
@@ -50,12 +50,12 @@ jobs:
 
       # The full suite already ran in the calling workflow's validate job; this is
       # the cheap last check that what is about to be applied is well formed.
-      - name: Validate templates and catalog
+      - name: Validate templates and environment config
         run: |
           uv run cfn-lint infra/*.yaml
           uv run rc-infra validate
 
-      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}

@@ -1,7 +1,7 @@
 [project]
 name = "rc-infra"
 version = "0.1.0"
-description = "Retribalize environment catalog and infrastructure deployment tooling"
+description = "Retribalize environment configuration and infrastructure deployment tooling"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [

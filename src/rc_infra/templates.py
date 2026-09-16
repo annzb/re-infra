@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from rc_infra.catalog import BUCKET_LOGICAL_IDS, Environment
+from rc_infra.env_config import BUCKET_LOGICAL_IDS, Environment
 
 PLATFORM_TEMPLATE_PATH = Path("infra/platform.yaml")
 ENVIRONMENT_TEMPLATE_PATH = Path("infra/environment.yaml")
@@ -65,13 +65,9 @@ def import_template(template: dict[str, Any], logical_ids: Iterable[str]) -> dic
     if missing:
         raise ValueError(f"template has no resources named {missing}")
     result: dict[str, Any] = {
-        key: copy.deepcopy(template[key])
-        for key in ("AWSTemplateFormatVersion", "Description", "Parameters")
-        if key in template
+        key: copy.deepcopy(template[key]) for key in ("AWSTemplateFormatVersion", "Description", "Parameters") if key in template
     }
-    result["Resources"] = {
-        logical_id: copy.deepcopy(template["Resources"][logical_id]) for logical_id in ids
-    }
+    result["Resources"] = {logical_id: copy.deepcopy(template["Resources"][logical_id]) for logical_id in ids}
     return result
 
 

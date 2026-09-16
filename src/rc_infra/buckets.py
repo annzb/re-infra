@@ -63,13 +63,9 @@ class S3Buckets:
     def live_config(self, name: str) -> dict[str, Any]:
         return {
             "encryption": self._optional(lambda: self._s3.get_bucket_encryption(Bucket=name)),
-            "public_access_block": self._optional(
-                lambda: self._s3.get_public_access_block(Bucket=name)
-            ),
+            "public_access_block": self._optional(lambda: self._s3.get_public_access_block(Bucket=name)),
             "versioning": self._s3.get_bucket_versioning(Bucket=name),
-            "lifecycle": self._optional(
-                lambda: self._s3.get_bucket_lifecycle_configuration(Bucket=name)
-            ),
+            "lifecycle": self._optional(lambda: self._s3.get_bucket_lifecycle_configuration(Bucket=name)),
             "cors": self._optional(lambda: self._s3.get_bucket_cors(Bucket=name)),
         }
 
@@ -78,10 +74,7 @@ class S3Buckets:
             return
         paginator = self._s3.get_paginator("list_object_versions")
         for page in paginator.paginate(Bucket=name):
-            objects = [
-                {"Key": item["Key"], "VersionId": item["VersionId"]}
-                for item in [*page.get("Versions", []), *page.get("DeleteMarkers", [])]
-            ]
+            objects = [{"Key": item["Key"], "VersionId": item["VersionId"]} for item in [*page.get("Versions", []), *page.get("DeleteMarkers", [])]]
             # list_object_versions pages hold at most 1000 entries, delete_objects' limit.
             if objects:
                 self._s3.delete_objects(Bucket=name, Delete={"Objects": objects, "Quiet": True})  # type: ignore[typeddict-item]
@@ -105,11 +98,7 @@ def config_diff(template_properties: Mapping[str, Any], live: Mapping[str, Any])
 
     expected = normalize_template(template_properties)
     actual = normalize_live(live)
-    return [
-        f"{group}: template={expected[group]!r} live={actual[group]!r}"
-        for group in sorted(expected)
-        if expected[group] != actual[group]
-    ]
+    return [f"{group}: template={expected[group]!r} live={actual[group]!r}" for group in sorted(expected) if expected[group] != actual[group]]
 
 
 def normalize_template(properties: Mapping[str, Any]) -> dict[str, Any]:
@@ -135,9 +124,7 @@ def normalize_template(properties: Mapping[str, Any]) -> dict[str, Any]:
                     prefix=rule.get("Prefix"),
                     expiration_days=rule.get("ExpirationInDays"),
                     noncurrent_days=rule.get("NoncurrentVersionExpirationInDays"),
-                    abort_multipart_days=rule.get("AbortIncompleteMultipartUpload", {}).get(
-                        "DaysAfterInitiation"
-                    ),
+                    abort_multipart_days=rule.get("AbortIncompleteMultipartUpload", {}).get("DaysAfterInitiation"),
                     other=sorted(set(rule) - _TEMPLATE_LIFECYCLE_KEYS),
                 )
                 for rule in lifecycle
@@ -183,12 +170,8 @@ def normalize_live(live: Mapping[str, Any]) -> dict[str, Any]:
                     status=rule.get("Status"),
                     prefix=(rule.get("Filter") or {}).get("Prefix", rule.get("Prefix")) or None,
                     expiration_days=rule.get("Expiration", {}).get("Days"),
-                    noncurrent_days=rule.get("NoncurrentVersionExpiration", {}).get(
-                        "NoncurrentDays"
-                    ),
-                    abort_multipart_days=rule.get("AbortIncompleteMultipartUpload", {}).get(
-                        "DaysAfterInitiation"
-                    ),
+                    noncurrent_days=rule.get("NoncurrentVersionExpiration", {}).get("NoncurrentDays"),
+                    abort_multipart_days=rule.get("AbortIncompleteMultipartUpload", {}).get("DaysAfterInitiation"),
                     other=sorted(set(rule) - _LIVE_LIFECYCLE_KEYS),
                 )
                 for rule in lifecycle

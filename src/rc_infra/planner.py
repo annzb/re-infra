@@ -1,4 +1,4 @@
-"""Compare the catalog with AWS and decide what `apply` would do. Never mutates anything.
+"""Compare the config with AWS and decide what `apply` would do. Never mutates anything.
 
 Creating and discarding a change set to preview an update is the only write; the
 plan role is allowed to do that but denied executing one.
@@ -13,12 +13,12 @@ from typing import Any
 
 from rc_infra.aws import Aws, Stack
 from rc_infra.buckets import config_diff
-from rc_infra.catalog import (
+from rc_infra.env_config import (
     BUCKET_LOGICAL_IDS,
     CORE_STACK_PREFIX,
     PLATFORM_STACK_NAME,
     RESOURCE_PREFIX,
-    Catalog,
+    EnvConfig,
     Environment,
     environment_from_core_stack,
 )
@@ -93,13 +93,11 @@ class Plan:
         )
 
 
-def build_plan(catalog: Catalog, aws: Aws) -> Plan:
+def build_plan(config: EnvConfig, aws: Aws) -> Plan:
     actions = [_plan_platform(aws)]
     environment_template = load_template(ENVIRONMENT_TEMPLATE_PATH)
-    actions.extend(
-        _plan_environment(env, aws, environment_template) for env in catalog.environments
-    )
-    removed, notes = _plan_removed_environments(catalog, aws)
+    actions.extend(_plan_environment(env, aws, environment_template) for env in config.environments)
+    removed, notes = _plan_removed_environments(config, aws)
     actions.extend(removed)
     actions.sort(key=lambda a: (_ORDER[a.kind], a.target))
     return Plan(actions=tuple(actions), notes=tuple(notes))
@@ -125,11 +123,7 @@ def _plan_environment(env: Environment, aws: Aws, template: dict[str, Any]) -> A
 
     def on_missing() -> Action:
         replace = stack is not None and stack.is_failed_create
-        existing = [
-            (BUCKET_LOGICAL_IDS[purpose], purpose, name)
-            for purpose, name in env.buckets.items()
-            if aws.buckets.exists(name)
-        ]
+        existing = [(BUCKET_LOGICAL_IDS[purpose], purpose, name) for purpose, name in env.buckets.items() if aws.buckets.exists(name)]
         if not existing:
             return Action(ActionKind.CREATE, env.name, env.core_stack, replace_failed_stack=replace)
 
@@ -139,12 +133,7 @@ def _plan_environment(env: Environment, aws: Aws, template: dict[str, Any]) -> A
             if owner and owner != env.core_stack:
                 problems.append(f"bucket {name} already belongs to stack {owner}")
                 continue
-            problems.extend(
-                f"bucket {name}: {diff}"
-                for diff in config_diff(
-                    bucket_properties(template, purpose), aws.buckets.live_config(name)
-                )
-            )
+            problems.extend(f"bucket {name}: {diff}" for diff in config_diff(bucket_properties(template, purpose), aws.buckets.live_config(name)))
         if problems:
             return Action(
                 ActionKind.BLOCKED,
@@ -201,23 +190,21 @@ def _plan_existing_or_create(
     changes = aws.stacks.preview(stack_name, body, parameters, tags, aws.cfn_role_arn)
     if not changes:
         return Action(ActionKind.NOOP, target, stack_name)
-    return Action(
-        ActionKind.UPDATE, target, stack_name, details=tuple(c.describe() for c in changes)
-    )
+    return Action(ActionKind.UPDATE, target, stack_name, details=tuple(c.describe() for c in changes))
 
 
-def _plan_removed_environments(catalog: Catalog, aws: Aws) -> tuple[list[Action], list[str]]:
+def _plan_removed_environments(config: EnvConfig, aws: Aws) -> tuple[list[Action], list[str]]:
     actions: list[Action] = []
     notes: list[str] = []
     for stack in aws.stacks.list_stacks(CORE_STACK_PREFIX):
         environment = environment_from_core_stack(stack.name)
-        if environment is None or environment in catalog.names:
+        if environment is None or environment in config.names:
             continue
         if stack.tags.get(MANAGED_BY_TAG) != MANAGED_BY_VALUE:
             notes.append(f"ignoring {stack.name}: not tagged {MANAGED_BY_TAG}={MANAGED_BY_VALUE}")
             continue
         try:
-            check_deletable(environment, stack, catalog.names)
+            check_deletable(environment, stack, config.names)
             found = inventory(environment, aws)
         except TeardownRefused as exc:
             actions.append(Action(ActionKind.BLOCKED, environment, stack.name, details=(str(exc),)))
@@ -251,10 +238,7 @@ def render_markdown(plan: Plan) -> str:
     deletions = plan.of_kind(ActionKind.DELETE)
     if deletions:
         names = ", ".join(f"`{a.target}`" for a in deletions)
-        lines.append(
-            f"> [!WARNING]\n> **Merging deletes {len(deletions)} environment(s): {names}**, "
-            "including their data."
-        )
+        lines.append(f"> [!WARNING]\n> **Merging deletes {len(deletions)} environment(s): {names}**, including their data.")
         lines.append("")
     lines.extend(["| Action | Target | Stack |", "|---|---|---|"])
     lines.extend(f"| {a.kind.value} | `{a.target}` | `{a.stack}` |" for a in plan.actions)
@@ -275,6 +259,4 @@ def render_markdown(plan: Plan) -> str:
 
 def _summary(plan: Plan) -> str:
     counts = {kind: len(plan.of_kind(kind)) for kind in ActionKind}
-    return "Summary: " + ", ".join(
-        f"{count} {kind.value.lower()}" for kind, count in counts.items()
-    )
+    return "Summary: " + ", ".join(f"{count} {kind.value.lower()}" for kind, count in counts.items())

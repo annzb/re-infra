@@ -1,1 +1,1 @@
-"""Retribalize environment catalog and infrastructure deployment tooling."""
+"""Retribalize environment configuration and infrastructure deployment tooling."""

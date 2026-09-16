@@ -23,10 +23,10 @@ def test_validate(capsys: pytest.CaptureFixture[str]) -> None:
     assert "is valid: 13 environments" in capsys.readouterr().out
 
 
-def test_validate_invalid_catalog(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    path = tmp_path / "catalog.yaml"
+def test_validate_invalid_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "env_config.yaml"
     path.write_text("schema_version: 1\nenvironments: {}\n")
-    assert main(["validate", "--catalog", str(path)]) == 1
+    assert main(["validate", "--config", str(path)]) == 1
     assert "is invalid" in capsys.readouterr().err
 
 
@@ -47,9 +47,7 @@ def test_blocked_plan_exits_nonzero(connected: FakeAws) -> None:
     assert main(["plan", "--format", "markdown"]) == 1
 
 
-def test_wrong_account_is_refused(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_wrong_account_is_refused(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def fail_connect(*_: Any) -> None:
         raise AssertionError("must not connect")
 

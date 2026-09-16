@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from rc_infra.buckets import config_diff
-from rc_infra.catalog import BUCKET_LOGICAL_IDS
+from rc_infra.env_config import BUCKET_LOGICAL_IDS
 from rc_infra.templates import ENVIRONMENT_TEMPLATE_PATH, bucket_properties, load_template
 from tests.fakes import matching_live_config
 
@@ -25,25 +25,19 @@ def test_missing_lifecycle_is_a_diff() -> None:
 def test_extra_live_cors_is_a_diff() -> None:
     live = matching_live_config("avatars")
     live["cors"] = {"CORSRules": [{"AllowedMethods": ["GET"], "AllowedOrigins": ["*"]}]}
-    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "avatars"), live)] == [
-        "cors"
-    ]
+    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "avatars"), live)] == ["cors"]
 
 
 def test_versioning_enabled_live_is_a_diff() -> None:
     live = matching_live_config("embeddings")
     live["versioning"] = {"Status": "Enabled"}
-    assert [
-        d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "embeddings"), live)
-    ] == ["versioning"]
+    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "embeddings"), live)] == ["versioning"]
 
 
 def test_missing_public_access_block_is_a_diff() -> None:
     live = matching_live_config("recordings")
     live["public_access_block"] = None
-    assert [
-        d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "recordings"), live)
-    ] == ["public_access_block"]
+    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "recordings"), live)] == ["public_access_block"]
 
 
 def test_legacy_prefix_field_and_rule_order_are_normalized() -> None:
@@ -65,9 +59,7 @@ def test_legacy_prefix_field_and_rule_order_are_normalized() -> None:
 def test_unmodelled_live_lifecycle_settings_are_a_diff() -> None:
     live = matching_live_config("user-corpus")
     live["lifecycle"]["Rules"][0]["Transitions"] = [{"Days": 30, "StorageClass": "GLACIER"}]
-    assert [
-        d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "user-corpus"), live)
-    ] == ["lifecycle"]
+    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "user-corpus"), live)] == ["lifecycle"]
 
 
 def test_unsupported_template_property_fails_loudly() -> None:

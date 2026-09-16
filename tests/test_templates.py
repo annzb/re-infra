@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from rc_infra.catalog import BUCKET_LOGICAL_IDS
+from rc_infra.env_config import BUCKET_LOGICAL_IDS
 from rc_infra.templates import (
     ENVIRONMENT_TEMPLATE_PATH,
     PLATFORM_TEMPLATE_PATH,
@@ -27,11 +27,7 @@ def test_templates_use_long_form_intrinsics() -> None:
 
 
 def test_every_bucket_is_declared_and_retained(env_template: dict[str, Any]) -> None:
-    buckets = {
-        logical_id
-        for logical_id, resource in env_template["Resources"].items()
-        if resource["Type"] == "AWS::S3::Bucket"
-    }
+    buckets = {logical_id for logical_id, resource in env_template["Resources"].items() if resource["Type"] == "AWS::S3::Bucket"}
     assert buckets == set(BUCKET_LOGICAL_IDS.values())
     for logical_id in buckets:
         resource = env_template["Resources"][logical_id]
@@ -40,13 +36,11 @@ def test_every_bucket_is_declared_and_retained(env_template: dict[str, Any]) -> 
         assert "NotificationConfiguration" not in resource["Properties"], logical_id
 
 
-def test_bucket_names_match_catalog_derivation(env_template: dict[str, Any], catalog: Any) -> None:
-    env = catalog.get("preview3")
+def test_bucket_names_match_env_config_derivation(env_template: dict[str, Any], env_config: Any) -> None:
+    env = env_config.get("preview3")
     for purpose, logical_id in BUCKET_LOGICAL_IDS.items():
         pattern = env_template["Resources"][logical_id]["Properties"]["BucketName"]["Fn::Sub"]
-        name = re.sub(r"\$\{EnvironmentName\}", env.name, pattern).replace(
-            "${AWS::AccountId}", env.account_id
-        )
+        name = re.sub(r"\$\{EnvironmentName\}", env.name, pattern).replace("${AWS::AccountId}", env.account_id)
         assert name == env.buckets[purpose]
 
 
@@ -54,8 +48,8 @@ def test_template_declares_no_dynamodb_tables(env_template: dict[str, Any]) -> N
     assert all(r["Type"] != "AWS::DynamoDB::Table" for r in env_template["Resources"].values())
 
 
-def test_parameters_match_template(env_template: dict[str, Any], catalog: Any) -> None:
-    assert set(environment_parameters(catalog.get("prod"))) == set(env_template["Parameters"])
+def test_parameters_match_template(env_template: dict[str, Any], env_config: Any) -> None:
+    assert set(environment_parameters(env_config.get("prod"))) == set(env_template["Parameters"])
 
 
 def test_import_template_contains_only_imported_resources(env_template: dict[str, Any]) -> None:

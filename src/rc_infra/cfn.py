@@ -67,9 +67,7 @@ class CloudFormationStacks:
         tags: Mapping[str, str],
         role_arn: str | None,
     ) -> list[ResourceChange]:
-        change_set_id, changes = self._create_change_set(
-            stack_name, ChangeSetKind.UPDATE, template_body, parameters, tags, role_arn, ()
-        )
+        change_set_id, changes = self._create_change_set(stack_name, ChangeSetKind.UPDATE, template_body, parameters, tags, role_arn, ())
         if change_set_id:
             self._cfn.delete_change_set(ChangeSetName=change_set_id)
         return changes
@@ -84,9 +82,7 @@ class CloudFormationStacks:
         role_arn: str | None,
         resources_to_import: Sequence[Mapping[str, Any]] = (),
     ) -> list[ResourceChange]:
-        change_set_id, changes = self._create_change_set(
-            stack_name, kind, template_body, parameters, tags, role_arn, resources_to_import
-        )
+        change_set_id, changes = self._create_change_set(stack_name, kind, template_body, parameters, tags, role_arn, resources_to_import)
         if not change_set_id:
             return []
         self._cfn.execute_change_set(ChangeSetName=change_set_id)
@@ -95,9 +91,7 @@ class CloudFormationStacks:
                 StackName=stack_name, WaiterConfig=_WAITER_CONFIG
             )
         except WaiterError as exc:
-            raise DeployError(
-                f"{stack_name}: {kind} failed\n{self._failure_events(stack_name)}"
-            ) from exc
+            raise DeployError(f"{stack_name}: {kind} failed\n{self._failure_events(stack_name)}") from exc
         return changes
 
     def set_termination_protection(self, name: str, enabled: bool) -> None:
@@ -111,9 +105,7 @@ class CloudFormationStacks:
             kwargs["RoleARN"] = role_arn
         self._cfn.delete_stack(**kwargs)
         try:
-            self._cfn.get_waiter("stack_delete_complete").wait(
-                StackName=name, WaiterConfig=_WAITER_CONFIG
-            )
+            self._cfn.get_waiter("stack_delete_complete").wait(StackName=name, WaiterConfig=_WAITER_CONFIG)
         except WaiterError as exc:
             raise DeployError(f"{name}: delete failed\n{self._failure_events(name)}") from exc
 
@@ -132,9 +124,7 @@ class CloudFormationStacks:
             "ChangeSetName": f"rc-infra-{uuid.uuid4().hex[:12]}",
             "ChangeSetType": kind.value,
             "TemplateBody": template_body,
-            "Parameters": [
-                {"ParameterKey": key, "ParameterValue": value} for key, value in parameters.items()
-            ],
+            "Parameters": [{"ParameterKey": key, "ParameterValue": value} for key, value in parameters.items()],
             "Tags": [{"Key": key, "Value": value} for key, value in tags.items()],
         }
         if role_arn:
@@ -144,9 +134,7 @@ class CloudFormationStacks:
 
         change_set_id = self._cfn.create_change_set(**kwargs)["Id"]
         try:
-            self._cfn.get_waiter("change_set_create_complete").wait(
-                ChangeSetName=change_set_id, WaiterConfig={"Delay": 5, "MaxAttempts": 120}
-            )
+            self._cfn.get_waiter("change_set_create_complete").wait(ChangeSetName=change_set_id, WaiterConfig={"Delay": 5, "MaxAttempts": 120})
         except WaiterError as exc:
             described = self._cfn.describe_change_set(ChangeSetName=change_set_id)
             reason = described.get("StatusReason", "")
@@ -184,10 +172,7 @@ class CloudFormationStacks:
             return "(stack events unavailable)"
         failures = [e for e in events if e.get("ResourceStatus", "").endswith("_FAILED")][:limit]
         return (
-            "\n".join(
-                f"  {e['LogicalResourceId']}: {e.get('ResourceStatusReason', e['ResourceStatus'])}"
-                for e in failures
-            )
+            "\n".join(f"  {e['LogicalResourceId']}: {e.get('ResourceStatusReason', e['ResourceStatus'])}" for e in failures)
             or "  (no failed resource events)"
         )
 

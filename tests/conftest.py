@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 import yaml
 
-from rc_infra.catalog import Catalog, parse_catalog
+from rc_infra.env_config import EnvConfig, parse_env_config
 from tests.fakes import FakeAws
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -15,18 +15,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def _run_from_repo_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Templates and the catalog are resolved relative to the repository root, like in CI.
+    # Templates and envs.yaml are resolved relative to the repository root, like in CI.
     monkeypatch.chdir(REPO_ROOT)
 
 
 @pytest.fixture
-def raw_catalog() -> dict[str, Any]:
-    return copy.deepcopy(yaml.safe_load((REPO_ROOT / "environments/catalog.yaml").read_text()))
+def raw_config() -> dict[str, Any]:
+    return copy.deepcopy(yaml.safe_load((REPO_ROOT / "envs.yaml").read_text()))
 
 
 @pytest.fixture
-def catalog(raw_catalog: dict[str, Any]) -> Catalog:
-    return parse_catalog(raw_catalog)
+def env_config(raw_config: dict[str, Any]) -> EnvConfig:
+    return parse_env_config(raw_config)
 
 
 @pytest.fixture

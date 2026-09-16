@@ -38,9 +38,7 @@ class FakeStacks:
         return self.stacks.get(name)
 
     def list_stacks(self, prefix: str) -> list[Stack]:
-        return sorted(
-            (s for s in self.stacks.values() if s.name.startswith(prefix)), key=lambda s: s.name
-        )
+        return sorted((s for s in self.stacks.values() if s.name.startswith(prefix)), key=lambda s: s.name)
 
     def stack_resources(self, name: str) -> list[StackResource]:
         return list(self.resources.get(name, []))
@@ -199,15 +197,7 @@ def matching_live_config(purpose: str) -> dict[str, Any]:
             ]
         },
     }.get(purpose)
-    cors = (
-        {
-            "CORSRules": [
-                {"AllowedHeaders": ["*"], "AllowedMethods": ["PUT"], "AllowedOrigins": ["*"]}
-            ]
-        }
-        if purpose == "user-corpus"
-        else None
-    )
+    cors = {"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["PUT"], "AllowedOrigins": ["*"]}]} if purpose == "user-corpus" else None
     return {
         "encryption": {
             "ServerSideEncryptionConfiguration": {
@@ -234,20 +224,17 @@ def matching_live_config(purpose: str) -> dict[str, Any]:
 
 
 def env_stack_resources(environment: str) -> list[StackResource]:
-    from rc_infra.catalog import BUCKET_LOGICAL_IDS
+    from rc_infra.env_config import BUCKET_LOGICAL_IDS
 
     return [
-        *(
-            StackResource(logical_id, bucket_name(environment, purpose), "AWS::S3::Bucket")
-            for purpose, logical_id in BUCKET_LOGICAL_IDS.items()
-        ),
+        *(StackResource(logical_id, bucket_name(environment, purpose), "AWS::S3::Bucket") for purpose, logical_id in BUCKET_LOGICAL_IDS.items()),
         StackResource("RegionParameter", f"/rc/env/{environment}/region", "AWS::SSM::Parameter"),
     ]
 
 
 def add_removed_environment(fake: FakeAws, name: str = "preview42") -> None:
-    """An environment that exists in AWS but is no longer in the catalog."""
-    from rc_infra.catalog import BUCKET_LOGICAL_IDS
+    """An environment that exists in AWS but is no longer in the env_config."""
+    from rc_infra.env_config import BUCKET_LOGICAL_IDS
 
     fake.stacks.add(f"rc-env-{name}", tags=env_stack_tags(name))
     fake.stacks.resources[f"rc-env-{name}"] = env_stack_resources(name)

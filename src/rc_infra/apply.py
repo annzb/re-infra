@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from rc_infra.aws import Aws, ChangeSetKind
-from rc_infra.catalog import Catalog
+from rc_infra.env_config import EnvConfig
 from rc_infra.planner import PLATFORM_TARGET, Action, ActionKind, Plan
 from rc_infra.teardown import teardown
 from rc_infra.templates import (
@@ -31,9 +31,7 @@ class ApplyResult:
     failed: list[str] = field(default_factory=list)
 
 
-def apply_plan(
-    plan: Plan, catalog: Catalog, aws: Aws, log: Callable[[str], None] = print
-) -> ApplyResult:
+def apply_plan(plan: Plan, config: EnvConfig, aws: Aws, log: Callable[[str], None] = print) -> ApplyResult:
     if plan.blocked:
         targets = ", ".join(a.target for a in plan.blocked)
         raise ApplyRefused(f"plan has blocked actions ({targets}); nothing was applied")
@@ -42,7 +40,7 @@ def apply_plan(
     # Creates and updates first, deletions last.
     for action in sorted(plan.actions, key=lambda a: a.kind is ActionKind.DELETE):
         try:
-            _apply_action(action, catalog, aws, log)
+            _apply_action(action, config, aws, log)
         except Exception as exc:  # one environment's failure must not stop the others
             log(f"{action.target}: FAILED: {exc}")
             result.failed.append(f"{action.target}: {exc}")
@@ -51,9 +49,9 @@ def apply_plan(
     return result
 
 
-def _apply_action(action: Action, catalog: Catalog, aws: Aws, log: Callable[[str], None]) -> None:
+def _apply_action(action: Action, config: EnvConfig, aws: Aws, log: Callable[[str], None]) -> None:
     if action.kind is ActionKind.DELETE:
-        teardown(action.target, aws, catalog.names, log)
+        teardown(action.target, aws, config.names, log)
         return
 
     if action.target == PLATFORM_TARGET:
@@ -62,7 +60,7 @@ def _apply_action(action: Action, catalog: Catalog, aws: Aws, log: Callable[[str
         tags = platform_tags()
         protect = True
     else:
-        env = catalog.get(action.target)
+        env = config.get(action.target)
         template = load_template(ENVIRONMENT_TEMPLATE_PATH)
         parameters = environment_parameters(env)
         tags = environment_tags(env)

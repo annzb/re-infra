@@ -1,6 +1,6 @@
-"""Load and validate environments/catalog.yaml, and derive every resource name from it.
+"""Load and validate envs.yaml, and derive every resource name from it.
 
-The catalog is the only place environment names are declared. Everything else --
+The config is the only place environment names are declared. Everything else --
 stack names, bucket names, table prefixes, SSM paths -- is derived here so that
 planning, applying, and tearing down can never disagree about what belongs to an
 environment.
@@ -17,10 +17,10 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-DEFAULT_CATALOG_PATH = Path("environments/catalog.yaml")
+DEFAULT_ENVS_PATH = Path("envs.yaml")
 SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
 
-# These environments can never be removed from the catalog or torn down.
+# These environments can never be removed from the config or torn down.
 PROTECTED_ENVIRONMENTS = frozenset({"prod", "staging", "dev"})
 
 # No hyphens: "rc-<env>-" must be an unambiguous prefix (rc-preview1- vs rc-preview1-x-),
@@ -44,8 +44,8 @@ APP_STACK_PREFIX = f"{RESOURCE_PREFIX}-app-"
 PLATFORM_STACK_NAME = f"{RESOURCE_PREFIX}-platform"
 
 
-class CatalogError(Exception):
-    """The catalog cannot be loaded or violates a rule. Holds every problem found."""
+class EnvConfigError(Exception):
+    """The config cannot be loaded or violates a rule. Holds every problem found."""
 
     def __init__(self, errors: list[str]) -> None:
         self.errors = errors
@@ -66,7 +66,7 @@ class EnvironmentSpec(_Strict):
     identity: str | None = None
 
 
-class CatalogFile(_Strict):
+class EnvConfigFile(_Strict):
     schema_version: int
     account_id: str = Field(pattern=r"^\d{12}$")
     region: str = Field(pattern=r"^[a-z]{2}-[a-z]+-\d$")
@@ -113,10 +113,7 @@ class Environment:
     @property
     def buckets(self) -> dict[str, str]:
         """Bucket purpose -> bucket name."""
-        return {
-            purpose: f"{RESOURCE_PREFIX}-{self.name}-{purpose}-{self.account_id}"
-            for purpose in BUCKET_LOGICAL_IDS
-        }
+        return {purpose: f"{RESOURCE_PREFIX}-{self.name}-{purpose}-{self.account_id}" for purpose in BUCKET_LOGICAL_IDS}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -135,7 +132,7 @@ class Environment:
 
 
 @dataclass(frozen=True)
-class Catalog:
+class EnvConfig:
     account_id: str
     region: str
     environments: tuple[Environment, ...]
@@ -178,31 +175,28 @@ def environment_from_core_stack(stack_name: str) -> str | None:
     return name if ENVIRONMENT_NAME_PATTERN.match(name) else None
 
 
-def load_catalog(path: Path = DEFAULT_CATALOG_PATH) -> Catalog:
+def load_env_config(path: Path = DEFAULT_ENVS_PATH) -> EnvConfig:
     try:
         raw = yaml.safe_load(path.read_text())
     except OSError as exc:
-        raise CatalogError([f"{path}: cannot read catalog: {exc}"]) from exc
+        raise EnvConfigError([f"{path}: cannot read config: {exc}"]) from exc
     except yaml.YAMLError as exc:
-        raise CatalogError([f"{path}: invalid YAML: {exc}"]) from exc
-    return parse_catalog(raw)
+        raise EnvConfigError([f"{path}: invalid YAML: {exc}"]) from exc
+    return parse_env_config(raw)
 
 
-def parse_catalog(raw: Any) -> Catalog:
+def parse_env_config(raw: Any) -> EnvConfig:
     if not isinstance(raw, dict):
-        raise CatalogError(["catalog: expected a mapping at the top level"])
+        raise EnvConfigError(["config: expected a mapping at the top level"])
 
     try:
-        parsed = CatalogFile.model_validate(raw)
+        parsed = EnvConfigFile.model_validate(raw)
     except ValidationError as exc:
-        raise CatalogError([_format_validation_error(err) for err in exc.errors()]) from exc
+        raise EnvConfigError([_format_validation_error(err) for err in exc.errors()]) from exc
 
     errors: list[str] = []
     if parsed.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
-        errors.append(
-            f"schema_version: unsupported version {parsed.schema_version}; "
-            f"supported: {sorted(SUPPORTED_SCHEMA_VERSIONS)}"
-        )
+        errors.append(f"schema_version: unsupported version {parsed.schema_version}; supported: {sorted(SUPPORTED_SCHEMA_VERSIONS)}")
 
     for name in sorted(PROTECTED_ENVIRONMENTS - parsed.environments.keys()):
         errors.append(f"environments.{name}: protected environment must not be removed")
@@ -219,10 +213,7 @@ def parse_catalog(raw: Any) -> Catalog:
         profile_name = spec.identity or _default_identity_profile(name, parsed.identity_profiles)
         profile = parsed.identity_profiles.get(profile_name)
         if profile is None:
-            errors.append(
-                f"environments.{name}.identity: unknown identity profile {profile_name!r}; "
-                f"defined: {sorted(parsed.identity_profiles)}"
-            )
+            errors.append(f"environments.{name}.identity: unknown identity profile {profile_name!r}; defined: {sorted(parsed.identity_profiles)}")
             continue
 
         environments.append(
@@ -236,9 +227,9 @@ def parse_catalog(raw: Any) -> Catalog:
         )
 
     if errors:
-        raise CatalogError(errors)
+        raise EnvConfigError(errors)
 
-    return Catalog(
+    return EnvConfig(
         account_id=parsed.account_id,
         region=parsed.region,
         environments=tuple(environments),
@@ -250,5 +241,5 @@ def _default_identity_profile(name: str, profiles: dict[str, IdentityProfile]) -
 
 
 def _format_validation_error(error: Any) -> str:
-    location = ".".join(str(part) for part in error["loc"]) or "catalog"
+    location = ".".join(str(part) for part in error["loc"]) or "config"
     return f"{location}: {error['msg']}"

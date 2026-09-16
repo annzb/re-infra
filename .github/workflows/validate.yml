@@ -58,7 +58,7 @@ jobs:
         run: uv run pytest
 
       # validate infra configs
-      - name: Validate templates and catalog
+      - name: Validate templates and environment config
         run: |
           uv run cfn-lint infra/*.yaml
           uv run rc-infra validate

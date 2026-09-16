@@ -1,4 +1,4 @@
-"""Delete an environment that was removed from the catalog.
+"""Delete an environment that was removed from envs.yaml.
 
 Order matters for safe retries. The rc-env-<env> stack is the record that an
 environment still exists, so it is deleted last: if anything fails midway, the next
@@ -13,7 +13,7 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass
 
 from rc_infra.aws import Aws, Stack
-from rc_infra.catalog import (
+from rc_infra.env_config import (
     APP_STACK_PREFIX,
     PROTECTED_ENVIRONMENTS,
     RESOURCE_PREFIX,
@@ -46,18 +46,17 @@ class Inventory:
         lines.extend(f"empty and delete bucket {name}" for name in self.buckets)
         lines.append(f"delete stack {self.core_stack}")
         lines.extend(
-            f"skip table {name} (not tagged ManagedBy=rc-dynamo-sync, "
-            f"Environment={self.environment}; delete manually if intended)"
+            f"skip table {name} (not tagged ManagedBy=rc-dynamo-sync, Environment={self.environment}; delete manually if intended)"
             for name in self.unmanaged_tables
         )
         return lines
 
 
-def check_deletable(environment: str, stack: Stack, catalog_names: Collection[str]) -> None:
+def check_deletable(environment: str, stack: Stack, declared_names: Collection[str]) -> None:
     if environment in PROTECTED_ENVIRONMENTS:
         raise TeardownRefused(f"{environment} is protected and can never be torn down")
-    if environment in catalog_names:
-        raise TeardownRefused(f"{environment} is still declared in the catalog")
+    if environment in declared_names:
+        raise TeardownRefused(f"{environment} is still declared in envs.yaml")
     if stack.name != core_stack_name(environment):
         raise TeardownRefused(f"{stack.name} is not the core stack of {environment}")
     expected_tags = {
@@ -89,9 +88,7 @@ def inventory(environment: str, aws: Aws) -> Inventory:
         if resource.resource_type != "AWS::S3::Bucket" or not resource.physical_id:
             continue
         if not resource.physical_id.startswith(bucket_prefix):
-            raise TeardownRefused(
-                f"{core_stack} bucket {resource.physical_id} does not start with {bucket_prefix}"
-            )
+            raise TeardownRefused(f"{core_stack} bucket {resource.physical_id} does not start with {bucket_prefix}")
         buckets.append(resource.physical_id)
 
     app_stack = f"{APP_STACK_PREFIX}{environment}"
@@ -109,7 +106,7 @@ def inventory(environment: str, aws: Aws) -> Inventory:
 def teardown(
     environment: str,
     aws: Aws,
-    catalog_names: Collection[str],
+    declared_names: Collection[str],
     log: Callable[[str], None] = print,
 ) -> None:
     core_stack = core_stack_name(environment)
@@ -117,7 +114,7 @@ def teardown(
     if stack is None:
         log(f"{environment}: {core_stack} does not exist; nothing to tear down")
         return
-    check_deletable(environment, stack, catalog_names)
+    check_deletable(environment, stack, declared_names)
 
     found = inventory(environment, aws)
     if found.app_stack_exists:

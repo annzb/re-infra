@@ -27,9 +27,9 @@ uv run pytest
 
 ## Add or change an environment
 
-1. Edit [`environments/catalog.yaml`](environments/catalog.yaml) (field reference:
-   [`environments/README.md`](environments/README.md)). A new preview is one line:
-   `preview12: {}`.
+1. Edit [`envs.yaml`](envs.yaml) (field reference:
+   [Environment configuration](#environment-configuration-envsyaml) below). A new
+   preview is one line: `preview12: {}`.
 2. Check it locally:
 
    ```bash
@@ -48,7 +48,7 @@ environment separately.
 
 ## Remove an environment
 
-1. Delete its entry from `environments/catalog.yaml`.
+1. Delete its entry from `envs.yaml`.
 2. Push the branch and read the plan: it lists the app stack, tables, and buckets
    that will be **deleted with their data**.
 3. Merge to `main`. `deploy-envs.yml` deletes, in order: `rc-app-<name>`, tables tagged
@@ -56,12 +56,86 @@ environment separately.
    (emptied first), and finally `rc-env-<name>`. If it fails midway, re-run the
    workflow; teardown continues where it stopped.
 
-`prod`, `staging`, and `dev` cannot be removed. The validator rejects a catalog
+`prod`, `staging`, and `dev` cannot be removed. The validator rejects an `envs.yaml`
 without them, their stacks have termination protection, and the deploy role has an
 explicit IAM deny on deleting their stacks, buckets, and tables.
 
 Untagged tables with the environment's prefix are listed as skipped and left alone.
 Legacy app stacks named `rc-<name>` are not deleted.
+
+## Environment configuration (`envs.yaml`)
+
+[`envs.yaml`](envs.yaml) in the repository root is the complete list of Retribalize
+deployment environments. Adding and removing entries is covered above; this section
+describes the fields.
+
+> **Removing an entry deletes that environment** when the change reaches `main`:
+> its app stack, its schema-sync tables, its buckets and all their data.
+> `prod`, `staging`, and `dev` can never be removed.
+
+Never commit secret values here. Cognito pool and client IDs are identifiers, not
+secrets; API keys, client secrets, and tokens belong in Secrets Manager.
+
+### Top-level fields
+
+| Field | Required | Description |
+|---|---|---|
+| `schema_version` | yes | Must be `1`. |
+| `account_id` | yes | 12-digit AWS account. `rc-infra` refuses to run with credentials for any other account. |
+| `region` | yes | Region for every stack, e.g. `us-east-1`. |
+| `identity_profiles` | yes | Named Cognito identifier sets: `user_pool_id`, `client_id`, `domain`. |
+| `environments` | yes | Map of environment name to its settings (usually `{}`). |
+
+### Environment fields
+
+| Field | Default | Description |
+|---|---|---|
+| `identity` | the profile with the same name as the environment, otherwise `preview` | Which `identity_profiles` entry the environment uses. |
+
+Unknown fields are rejected, so a typo fails validation instead of being ignored.
+
+### Names
+
+Environment names are lowercase letters and digits, start with a letter, and are at
+most 20 characters (`^[a-z][a-z0-9]{1,19}$`). No hyphens: `rc-<name>-` must be an
+unambiguous prefix.
+
+Everything else is derived from the name. For `preview3` in account `273268178059`:
+
+| Resource | Name |
+|---|---|
+| Core stack (this repo) | `rc-env-preview3` |
+| App stack (retribalize-core) | `rc-app-preview3` |
+| DynamoDB table prefix (rc-dynamo-sync) | `rc-preview3-` |
+| Buckets | `rc-preview3-{embeddings,user-corpus,avatars,recordings,schema-dumps}-273268178059` |
+| SSM parameters | `/rc/env/preview3/...` |
+
+### Published SSM parameters
+
+Each `rc-env-<name>` stack writes these `String` parameters (and the same values as
+stack outputs). retribalize-core reads them instead of keeping its own mapping.
+
+| Parameter | Value |
+|---|---|
+| `/rc/env/<name>/region` | AWS region |
+| `/rc/env/<name>/table-prefix` | `rc-<name>-` |
+| `/rc/env/<name>/app-stack-name` | `rc-app-<name>` |
+| `/rc/env/<name>/bucket/<purpose>` | bucket name for `embeddings`, `user-corpus`, `avatars`, `recordings`, `schema-dumps` |
+| `/rc/env/<name>/cognito/profile` | identity profile name |
+| `/rc/env/<name>/cognito/user-pool-id` | Cognito user pool ID |
+| `/rc/env/<name>/cognito/client-id` | Cognito app client ID |
+| `/rc/env/<name>/cognito/domain` | Cognito hosted UI domain |
+
+### Lifecycle
+
+```text
+declared in envs.yaml ──merge──▶ rc-env-<name> created (or existing buckets imported)
+removed from envs.yaml ──merge──▶ app stack, tables, buckets, core stack deleted
+```
+
+Protected environments (`prod`, `staging`, `dev`) have CloudFormation termination
+protection, retained buckets, and an explicit IAM deny on deletion, on top of the
+validator refusing an `envs.yaml` without them.
 
 ## Add or update a base-image dependency
 
@@ -130,7 +204,7 @@ workflows: nothing runs on a pull request, and nothing is started by hand.
 .github/workflows/validate.yml
   1. validate -> ruff / mypy / pytest   -> src/rc_infra/**, tests/**
                  cfn-lint infra/*.yaml  -> roles.yaml, platform.yaml, environment.yaml
-                 rc-infra validate      -> cli.py -> catalog.py -> environments/catalog.yaml
+                 rc-infra validate      -> cli.py -> env_config.py -> envs.yaml
   2. plan     -> rc-infra plan, with the read-only role
                  -> planner.py -> cfn.py | buckets.py | tables.py,
                     reading infra/platform.yaml and infra/environment.yaml
@@ -148,9 +222,9 @@ workflows: nothing runs on a pull request, and nothing is started by hand.
 ```text
   5. deploy-envs.yml -> rc-infra apply --yes -> apply.py
        a. infra/platform.yaml    -> stack rc-platform
-       b. infra/environment.yaml -> stack rc-env-<name>, per catalog entry
+       b. infra/environment.yaml -> stack rc-env-<name>, per envs.yaml entry
                                     (create, import existing buckets, or update)
-       c. teardown.py            -> for environments removed from the catalog:
+       c. teardown.py            -> for environments removed from envs.yaml:
                                     rc-app-<name> -> tables -> buckets -> rc-env-<name>
   6. build-base-images.yml
        c. publish -> ECR build tag -> scan -> latest -> SSM /rc/lambda-base/image-uri
@@ -232,4 +306,4 @@ CloudFormation.
   tags are immutable; list them with
   `aws ecr describe-images --repository-name rc-lambda-base`.
 - Do not repair stack-owned resources by hand in the AWS console. Change the template
-  or catalog and let `deploy-envs.yml` apply it.
+  or `envs.yaml` and let `deploy-envs.yml` apply it.

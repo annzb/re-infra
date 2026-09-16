@@ -83,8 +83,9 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub:
-                  - Fn::Sub: "repo:${GitHubOrg}/${GitHubRepo}:pull_request"
-                  - Fn::Sub: "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+                  # Any branch: validate.yml plans on every push. The Deny below is what
+                  # keeps that harmless -- this role can never execute a change set.
+                  - Fn::Sub: "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/*"
       Policies:
         - PolicyName: plan
           PolicyDocument:

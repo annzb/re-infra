@@ -1,25 +1,29 @@
-name: Validate infrastructure
+name: Validate
 
-# Pull request checks for the rc-infra tool, the templates, and the catalog, plus the
-# plan of what merging would change in AWS. Applies nothing: the plan role is denied
-# executing change sets. Applying happens in deploy.yml, on main.
+# The only workflow a push triggers, and the entry point for everything else:
+#
+#   any branch:  validate -> plan (read-only) -> build-base-images (build, test)
+#   main:        validate -> plan -> deploy-envs -> build-base-images (+ publish)
+#
+# Nothing in this file changes AWS. The plan role it assumes is denied executing
+# change sets; applying happens only in deploy-envs.yml, which runs on main.
 
 on:
-  pull_request:
-  workflow_dispatch:
+  push:
 
 permissions:
   contents: read
 
 concurrency:
-  group: validate-${{ github.ref }}
-  cancel-in-progress: true
+  group: re-infra-${{ github.ref }}
+  # A run on main may be mid-apply, so it is never cancelled.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   AWS_REGION: us-east-1
 
 jobs:
-  checks:
+  validate:
     name: Lint, test, validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -52,10 +56,8 @@ jobs:
           uv run rc-infra validate
 
   plan:
-    name: Infrastructure plan
-    needs: checks
-    # OIDC tokens are not issued to pull requests from forks.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Infrastructure plan (read-only)
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -83,6 +85,68 @@ jobs:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Fails the check when anything is BLOCKED; DELETE is highlighted at the top.
+      # Fails the run when anything is BLOCKED; DELETE is highlighted at the top.
       - name: Plan
         run: uv run rc-infra plan --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
+
+  changes:
+    name: Detect base-image changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.check.outputs.images }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A called workflow cannot carry its own paths filter, so the caller decides
+      # whether a new base image is worth publishing.
+      - name: Check images/lambda-base
+        id: check
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -z "$BEFORE" ] ||
+             [ "$BEFORE" = "0000000000000000000000000000000000000000" ] ||
+             ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # New branch, or a commit this clone does not have: assume changed.
+            echo "images=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$BEFORE" "$GITHUB_SHA" |
+               grep -qE '^(images/lambda-base/|\.github/workflows/build-base-images\.yml$)'; then
+            echo "images=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "images=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy-envs:
+    name: Deploy environments
+    needs: [validate, plan]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy-envs.yml
+
+  build-base-images:
+    name: Base images
+    needs: [validate, plan, changes, deploy-envs]
+    # deploy-envs is skipped off main, which must not skip the image build.
+    if: >-
+      always()
+      && needs.validate.result == 'success'
+      && needs.plan.result == 'success'
+      && needs.changes.result == 'success'
+      && contains(fromJSON('["success", "skipped"]'), needs.deploy-envs.result)
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/build-base-images.yml
+    with:
+      publish: ${{ github.ref == 'refs/heads/main' && needs.changes.outputs.images == 'true' }}

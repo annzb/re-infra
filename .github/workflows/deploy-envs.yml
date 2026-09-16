@@ -1,21 +1,16 @@
-name: Deploy infrastructure
+name: Deploy environments
 
-# Applies environments/catalog.yaml to AWS: creates, imports, or updates rc-platform
-# and every rc-env-<name> stack, then tears down environments removed from the
-# catalog. The pull request's "Infrastructure plan" summary showed exactly this.
+# INFRASTRUCTURE ONLY. This applies environments/catalog.yaml to AWS: rc-platform,
+# one rc-env-<name> stack per catalog entry (created, imported, or updated), and
+# teardown of environments removed from the catalog.
+#
+# It never deploys an application. The rc-app-<name> stacks belong to
+# retribalize-core, which reads what this publishes under /rc/env/<name>/.
+#
+# Called by validate.yml, for main only, after validation and the plan pass.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - environments/**
-      - infra/**
-      - src/**
-      - pyproject.toml
-      - uv.lock
-      - .github/workflows/deploy.yml
-  # Safe retry: apply is idempotent and re-plans from the current state.
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -30,6 +25,7 @@ env:
 
 jobs:
   apply:
+    name: Apply the environment catalog
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -50,13 +46,12 @@ jobs:
           enable-cache: true
 
       - name: Install
-        run: |
-          uv lock --check
-          uv sync --frozen
+        run: uv sync --frozen
 
-      - name: Validate
+      # The full suite already ran in the calling workflow's validate job; this is
+      # the cheap last check that what is about to be applied is well formed.
+      - name: Validate templates and catalog
         run: |
-          uv run pytest
           uv run cfn-lint infra/*.yaml
           uv run rc-infra validate
 
@@ -65,6 +60,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # Recorded in the run summary, then applied. Refuses to apply anything BLOCKED.
       - name: Plan
         run: uv run rc-infra plan --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
 

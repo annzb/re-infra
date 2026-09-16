@@ -38,10 +38,10 @@ uv run pytest
    uv run rc-infra plan
    ```
 
-3. Open a pull request. The **Infrastructure plan** job summary shows every
-   `CREATE`, `IMPORT`, `UPDATE`, `DELETE`, and `BLOCKED` action.
-4. Merge. `deploy.yml` applies the plan and the new `rc-env-<name>` stack publishes
-   its SSM parameters.
+3. Push the branch. The **Infrastructure plan (read-only)** job summary shows every
+   `CREATE`, `IMPORT`, `UPDATE`, `DELETE`, and `BLOCKED` action, and applies nothing.
+4. Merge to `main`. The same run continues into `deploy-envs.yml`, which applies the
+   plan; the new `rc-env-<name>` stack then publishes its SSM parameters.
 
 This does not deploy the application. Deploy `retribalize-core` into the new
 environment separately.
@@ -49,9 +49,9 @@ environment separately.
 ## Remove an environment
 
 1. Delete its entry from `environments/catalog.yaml`.
-2. Open a pull request and read the plan: it lists the app stack, tables, and
-   buckets that will be **deleted with their data**.
-3. Merge. `deploy.yml` deletes, in order: `rc-app-<name>`, DynamoDB tables tagged
+2. Push the branch and read the plan: it lists the app stack, tables, and buckets
+   that will be **deleted with their data**.
+3. Merge to `main`. `deploy-envs.yml` deletes, in order: `rc-app-<name>`, tables tagged
    `ManagedBy=rc-dynamo-sync` and `Environment=<name>`, the environment's buckets
    (emptied first), and finally `rc-env-<name>`. If it fails midway, re-run the
    workflow; teardown continues where it stopped.
@@ -102,10 +102,9 @@ uv remove <package>
    The integration suite refuses to run unless it is pointed at LocalStack with
    those `test` credentials, so it can never touch a real table.
 
-4. Merge. `build.yml` builds the image, `test.yml` tests it, and only then is it
-   published. Existing
-   application images are unchanged until `retribalize-core` rebuilds from the new
-   digest.
+4. Push. `build-base-images.yml` builds the image and tests it on every branch; only
+   on `main` does its `publish` job push to ECR. Existing application images are
+   unchanged until `retribalize-core` rebuilds from the new digest.
 
 ## Build the base image locally
 
@@ -122,38 +121,44 @@ The image is a parent image with no `CMD`; service images add their handler.
 
 ## What runs what
 
-Every deployment starts with a workflow, which runs the repository's files in order.
+A push is the only trigger. `validate.yml` is the entry point and calls the other two
+workflows: nothing runs on a pull request, and nothing is started by hand.
 
-**On a pull request**
-
-```text
-1. .github/workflows/validate.yml
-   a. ruff / mypy / pytest      -> src/rc_infra/**, tests/**
-   b. cfn-lint infra/*.yaml     -> roles.yaml, platform.yaml, environment.yaml
-   c. rc-infra validate         -> cli.py -> catalog.py -> environments/catalog.yaml
-   d. rc-infra plan             -> planner.py -> cfn.py | buckets.py | tables.py,
-                                   reading infra/platform.yaml and infra/environment.yaml
-                                   -> plan in the run summary (fails on BLOCKED)
-2. .github/workflows/build.yml       (only when images/lambda-base/** changed)
-   a. build  -> images/lambda-base/Dockerfile -> image uploaded as an artifact
-   b. test   -> .github/workflows/test.yml -> pytest + smoke tests on that image
-              (nothing is published from a pull request)
-```
-
-**On merge to main**
+**Every push, on any branch**
 
 ```text
-1. .github/workflows/deploy.yml -> rc-infra apply --yes -> apply.py
-   a. infra/platform.yaml    -> stack rc-platform
-   b. infra/environment.yaml -> stack rc-env-<name>, per catalog entry
-                                (create, import existing buckets, or update)
-   c. teardown.py            -> for environments removed from the catalog:
-                                rc-app-<name> -> tables -> buckets -> rc-env-<name>
-2. .github/workflows/build.yml
-   a. build   -> image artifact
-   b. test    -> .github/workflows/test.yml
-   c. publish -> ECR build tag -> scan -> latest -> SSM /rc/lambda-base/image-uri
+.github/workflows/validate.yml
+  1. validate -> ruff / mypy / pytest   -> src/rc_infra/**, tests/**
+                 cfn-lint infra/*.yaml  -> roles.yaml, platform.yaml, environment.yaml
+                 rc-infra validate      -> cli.py -> catalog.py -> environments/catalog.yaml
+  2. plan     -> rc-infra plan, with the read-only role
+                 -> planner.py -> cfn.py | buckets.py | tables.py,
+                    reading infra/platform.yaml and infra/environment.yaml
+                 -> plan in the run summary; fails the run on BLOCKED
+  3. changes  -> did images/lambda-base/** change?
+  4. build-base-images.yml
+       a. build -> images/lambda-base/Dockerfile -> image artifact
+       b. test  -> pytest tests/unit and tests/integration (LocalStack),
+                   then smoke tests on the built image
+                   (its publish job is skipped off main)
 ```
+
+**Push to `main`, in the same run**
+
+```text
+  5. deploy-envs.yml -> rc-infra apply --yes -> apply.py
+       a. infra/platform.yaml    -> stack rc-platform
+       b. infra/environment.yaml -> stack rc-env-<name>, per catalog entry
+                                    (create, import existing buckets, or update)
+       c. teardown.py            -> for environments removed from the catalog:
+                                    rc-app-<name> -> tables -> buckets -> rc-env-<name>
+  6. build-base-images.yml
+       c. publish -> ECR build tag -> scan -> latest -> SSM /rc/lambda-base/image-uri
+                     (only when images/lambda-base/** changed)
+```
+
+`deploy-envs.yml` deploys infrastructure only. Application stacks (`rc-app-<name>`)
+are never touched here; `retribalize-core` owns them.
 
 **Manual, once:** `infra/roles.yaml` -> stack `rc-bootstrap` (the three IAM roles).
 
@@ -201,8 +206,9 @@ CloudFormation.
 
 2. Add repository **variables** (not secrets) from the stack outputs:
    `AWS_PLAN_ROLE_ARN`, `AWS_DEPLOY_ROLE_ARN`, `AWS_CFN_EXEC_ROLE_ARN`.
-3. Protect `main`: require pull requests, the *Validate infrastructure* checks, and
-   CODEOWNERS review; block force pushes and deletion.
+3. Protect `main`: require the `Lint, test, validate` and `Infrastructure plan
+   (read-only)` checks (they report on every push, including a pull request's branch)
+   plus CODEOWNERS review; block force pushes and deletion.
 4. Before the first merge that applies, run `uv run rc-infra plan` locally. Existing
    `prod`/`staging`/`dev` buckets appear as `IMPORT`, or as `BLOCKED` with the exact
    differences between the live bucket and the template. Change the **template** to
@@ -210,9 +216,11 @@ CloudFormation.
 
 ## Troubleshooting
 
-- **Workflow logs:** GitHub → Actions → *Validate infrastructure*, *Deploy
-  infrastructure*, *Build base image*, or *Test base image*. The plan is in the
-  validate and deploy run summaries.
+- **Workflow logs:** GitHub → Actions → *Validate*. Every job runs there, including
+  the called *Deploy environments* and *Build base images* workflows, and the plan is
+  in the run summary.
+- **Retry a failed deploy:** open the run and press **Re-run jobs**, or push again.
+  `rc-infra apply` is idempotent and re-plans from the current state.
 - **See the plan without applying:** `uv run rc-infra plan` (or `apply` without
   `--yes`).
 - **Inspect a stack:**
@@ -224,4 +232,4 @@ CloudFormation.
   tags are immutable; list them with
   `aws ecr describe-images --repository-name rc-lambda-base`.
 - Do not repair stack-owned resources by hand in the AWS console. Change the template
-  or catalog and let `deploy.yml` apply it.
+  or catalog and let `deploy-envs.yml` apply it.

@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import pytest
+
+from rc_infra.buckets import config_diff
+from rc_infra.catalog import BUCKET_LOGICAL_IDS
+from rc_infra.templates import ENVIRONMENT_TEMPLATE_PATH, bucket_properties, load_template
+from tests.fakes import matching_live_config
+
+TEMPLATE = load_template(ENVIRONMENT_TEMPLATE_PATH)
+
+
+@pytest.mark.parametrize("purpose", sorted(BUCKET_LOGICAL_IDS))
+def test_matching_live_bucket_has_no_diff(purpose: str) -> None:
+    assert config_diff(bucket_properties(TEMPLATE, purpose), matching_live_config(purpose)) == []
+
+
+def test_missing_lifecycle_is_a_diff() -> None:
+    live = matching_live_config("user-corpus")
+    live["lifecycle"] = None
+    diffs = config_diff(bucket_properties(TEMPLATE, "user-corpus"), live)
+    assert len(diffs) == 1 and diffs[0].startswith("lifecycle:")
+
+
+def test_extra_live_cors_is_a_diff() -> None:
+    live = matching_live_config("avatars")
+    live["cors"] = {"CORSRules": [{"AllowedMethods": ["GET"], "AllowedOrigins": ["*"]}]}
+    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "avatars"), live)] == [
+        "cors"
+    ]
+
+
+def test_versioning_enabled_live_is_a_diff() -> None:
+    live = matching_live_config("embeddings")
+    live["versioning"] = {"Status": "Enabled"}
+    assert [
+        d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "embeddings"), live)
+    ] == ["versioning"]
+
+
+def test_missing_public_access_block_is_a_diff() -> None:
+    live = matching_live_config("recordings")
+    live["public_access_block"] = None
+    assert [
+        d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "recordings"), live)
+    ] == ["public_access_block"]
+
+
+def test_legacy_prefix_field_and_rule_order_are_normalized() -> None:
+    live = matching_live_config("user-corpus")
+    live["lifecycle"] = {
+        "Rules": [
+            {
+                "ID": "ExpireRawUploads",
+                "Status": "Enabled",
+                "Prefix": "uploads/",
+                "Expiration": {"Days": 7},
+            }
+        ]
+    }
+    live["cors"]["CORSRules"][0]["AllowedHeaders"] = ["*"]
+    assert config_diff(bucket_properties(TEMPLATE, "user-corpus"), live) == []
+
+
+def test_unmodelled_live_lifecycle_settings_are_a_diff() -> None:
+    live = matching_live_config("user-corpus")
+    live["lifecycle"]["Rules"][0]["Transitions"] = [{"Days": 30, "StorageClass": "GLACIER"}]
+    assert [
+        d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "user-corpus"), live)
+    ] == ["lifecycle"]
+
+
+def test_unsupported_template_property_fails_loudly() -> None:
+    with pytest.raises(ValueError, match="OwnershipControls"):
+        config_diff({"OwnershipControls": {}}, matching_live_config("avatars"))

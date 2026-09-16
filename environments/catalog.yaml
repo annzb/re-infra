@@ -1,0 +1,46 @@
+# Desired state of every Retribalize deployment environment.
+#
+# Adding an entry creates its rc-env-<name> stack on merge to main.
+# Removing an entry DELETES the environment on merge: its app stack, its
+# schema-sync tables, its buckets and their data. prod, staging and dev can
+# never be removed. Field reference: environments/README.md.
+
+schema_version: 1
+account_id: "273268178059"
+region: us-east-1
+
+# Non-secret Cognito identifiers. The pools themselves are managed outside this
+# repository (see infrastructure/identity/README.md).
+identity_profiles:
+  prod:
+    user_pool_id: us-east-1_1GIFBpLKf
+    client_id: 10248ltom7g0tgb22si919e9ak
+    domain: rc-prod-v2.auth.us-east-1.amazoncognito.com
+  staging:
+    user_pool_id: us-east-1_udXBXbTYS
+    client_id: 357qproe69l0qdbjm6v871ve8t
+    domain: rc-staging-v2.auth.us-east-1.amazoncognito.com
+  dev:
+    user_pool_id: us-east-1_cbi939AdR
+    client_id: 3slkc1h9k7uhqd3v52dkvk04li
+    domain: rc-dev-v2.auth.us-east-1.amazoncognito.com
+  preview:
+    user_pool_id: us-east-1_LwH5lWQ0q
+    client_id: 1e8lodbfnn00pbkq7rj1n5smfo
+    domain: rc-preview-v2.auth.us-east-1.amazoncognito.com
+
+environments:
+  prod: {}
+  staging: {}
+  dev: {}
+
+  preview1: {}
+  preview2: {}
+  preview3: {}
+  preview4: {}
+  preview5: {}
+  preview6: {}
+  preview7: {}
+  preview8: {}
+  preview67: {}
+  preview89: {}

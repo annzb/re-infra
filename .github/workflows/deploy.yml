@@ -1,0 +1,73 @@
+name: Deploy infrastructure
+
+# Applies environments/catalog.yaml to AWS: creates, imports, or updates rc-platform
+# and every rc-env-<name> stack, then tears down environments removed from the
+# catalog. The pull request's "Infrastructure plan" summary showed exactly this.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - environments/**
+      - infrastructure/platform/**
+      - infrastructure/environment/**
+      - src/**
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/deploy.yml
+  # Safe retry: apply is idempotent and re-plans from the current state.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One infrastructure apply at a time; never cancel one midway.
+concurrency:
+  group: re-infra-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RC_INFRA_CFN_ROLE_ARN: ${{ vars.AWS_CFN_EXEC_ROLE_ARN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: |
+          uv lock --check
+          uv sync --frozen
+
+      - name: Validate
+        run: |
+          uv run pytest
+          uv run cfn-lint infrastructure/*/template.yaml
+          uv run rc-infra validate
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Plan
+        run: uv run rc-infra plan --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply
+        run: uv run rc-infra apply --yes

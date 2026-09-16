@@ -1,0 +1,11 @@
+# Replace @annzb with the infrastructure team once one exists.
+*                           @annzb
+
+# Changes here create, import, or delete AWS resources.
+/environments/              @annzb
+/infrastructure/            @annzb
+/src/rc_infra/              @annzb
+/.github/workflows/         @annzb
+
+# Every Lambda image is built from this.
+/images/lambda-base/        @annzb

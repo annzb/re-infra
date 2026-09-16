@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Retribalize per-environment core resources (stack rc-env-<environment>).
+  Durable buckets and the SSM parameters retribalize-core reads to deploy
+  into this environment. Deployed by `rc-infra apply`; do not deploy by hand.
+
+# Conventions (rc-infra parses this file with yaml.safe_load):
+#   - Long-form intrinsics only (Fn::Sub, Ref), never !Sub / !Ref.
+#   - Every bucket is Retain. Deleting the stack never deletes data; rc-infra
+#     empties and deletes preview buckets explicitly during teardown.
+#   - Existing buckets are adopted with a CloudFormation import, which only
+#     succeeds cleanly when the properties below match the live bucket.
+#   - DynamoDB tables are NOT declared here. rc-dynamo-sync (retribalize-core)
+#     owns their creation and schema.
+#   - No NotificationConfiguration on UserCorpusBucket. retribalize-core's
+#     setup_corpus_triggers.py owns that bucket's notifications.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9]{1,19}$"
+  IdentityProfile:
+    Type: String
+  UserPoolId:
+    Type: String
+  UserPoolClientId:
+    Type: String
+  CognitoDomain:
+    Type: String
+
+Resources:
+  EmbeddingsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: "rc-${EnvironmentName}-embeddings-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  UserCorpusBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: "rc-${EnvironmentName}-user-corpus-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRawUploads
+            Status: Enabled
+            Prefix: uploads/
+            ExpirationInDays: 7
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [PUT]
+            AllowedOrigins: ["*"]
+
+  AvatarsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: "rc-${EnvironmentName}-avatars-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  RecordingsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: "rc-${EnvironmentName}-recordings-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SchemaDumpsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: "rc-${EnvironmentName}-schema-dumps-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireSchemaDumps
+            Status: Enabled
+            ExpirationInDays: 30
+
+  RegionParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/region"
+      Type: String
+      Value:
+        Ref: AWS::Region
+
+  TablePrefixParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/table-prefix"
+      Type: String
+      Value:
+        Fn::Sub: "rc-${EnvironmentName}-"
+
+  AppStackNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/app-stack-name"
+      Type: String
+      Value:
+        Fn::Sub: "rc-app-${EnvironmentName}"
+
+  EmbeddingsBucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/bucket/embeddings"
+      Type: String
+      Value:
+        Ref: EmbeddingsBucket
+
+  UserCorpusBucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/bucket/user-corpus"
+      Type: String
+      Value:
+        Ref: UserCorpusBucket
+
+  AvatarsBucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/bucket/avatars"
+      Type: String
+      Value:
+        Ref: AvatarsBucket
+
+  RecordingsBucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/bucket/recordings"
+      Type: String
+      Value:
+        Ref: RecordingsBucket
+
+  SchemaDumpsBucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/bucket/schema-dumps"
+      Type: String
+      Value:
+        Ref: SchemaDumpsBucket
+
+  IdentityProfileParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/cognito/profile"
+      Type: String
+      Value:
+        Ref: IdentityProfile
+
+  UserPoolIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/cognito/user-pool-id"
+      Type: String
+      Value:
+        Ref: UserPoolId
+
+  UserPoolClientIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/cognito/client-id"
+      Type: String
+      Value:
+        Ref: UserPoolClientId
+
+  CognitoDomainParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "/rc/env/${EnvironmentName}/cognito/domain"
+      Type: String
+      Value:
+        Ref: CognitoDomain
+
+Outputs:
+  EnvironmentName:
+    Value:
+      Ref: EnvironmentName
+  Region:
+    Value:
+      Ref: AWS::Region
+  TablePrefix:
+    Value:
+      Fn::Sub: "rc-${EnvironmentName}-"
+  AppStackName:
+    Value:
+      Fn::Sub: "rc-app-${EnvironmentName}"
+  EmbeddingsBucketName:
+    Value:
+      Ref: EmbeddingsBucket
+  UserCorpusBucketName:
+    Value:
+      Ref: UserCorpusBucket
+  AvatarsBucketName:
+    Value:
+      Ref: AvatarsBucket
+  RecordingsBucketName:
+    Value:
+      Ref: RecordingsBucket
+  SchemaDumpsBucketName:
+    Value:
+      Ref: SchemaDumpsBucket
+  IdentityProfile:
+    Value:
+      Ref: IdentityProfile
+  UserPoolId:
+    Value:
+      Ref: UserPoolId
+  UserPoolClientId:
+    Value:
+      Ref: UserPoolClientId
+  CognitoDomain:
+    Value:
+      Ref: CognitoDomain

@@ -1,4 +1,4 @@
-name: Build
+name: Deploy images
 
 # Build the base app image, test it, and publish to ECR.
 # Called by entrypoint workflows main.yml and non-main.yml.

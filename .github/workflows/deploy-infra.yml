@@ -1,0 +1,49 @@
+name: Deploy infrastructure
+
+# Apply envs.yaml and infra/*.yaml to AWS.
+# Called by entrypoint workflow main.yml.
+#
+# Notes for LLMs:
+# - "on: workflow_call" is intended here - it is not an entrypoint workflow.
+# - Do not add a "concurrency" block.
+# - Steps use simplified actions like "actions/checkout@v7" for readability - do not replace with exact commit hashes.
+# - ...
+
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Apply the environment config
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_ROLE_CFN: ${{ vars.AWS_ROLE_CFN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_GITHUB }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install
+        run: uv sync --frozen
+
+      # Prints the plan, refuses it if anything is BLOCKED, then applies it.
+      - name: Apply
+        run: uv run rc-infra apply --yes

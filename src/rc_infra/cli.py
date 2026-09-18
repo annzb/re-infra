@@ -19,7 +19,7 @@ from rc_infra.apply import ApplyRefused, apply_plan
 from rc_infra.env_config import DEFAULT_ENVS_PATH, EnvConfig, EnvConfigError, load_env_config
 from rc_infra.planner import build_plan, render_text
 
-CFN_ROLE_ENV = "RC_INFRA_CFN_ROLE_ARN"
+CFN_ROLE_ENV = "AWS_ROLE_CFN"
 
 
 def main(argv: Sequence[str] | None = None) -> int:

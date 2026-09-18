@@ -64,7 +64,7 @@ Resources:
                 Resource:
                   Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/rc-app-*"
 
-  # The only role GitHub Actions assumes. Any branch may assume it, because build.yml
+  # The only role GitHub Actions assumes. Any branch may assume it, because deploy-images.yml
   # publishes an image tag from every branch; only main.yml routes it into a deploy.
   # The denies below are what keep a branch from reaching protected environments.
   GitHubRole:
@@ -201,13 +201,6 @@ Resources:
                   - ecr:UploadLayerPart
                 Resource:
                   Fn::Sub: "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/rc-dynamo"
-              - Sid: PublishLambdaBaseDigest
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:PutParameter
-                Resource:
-                  Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/rc/dynamo/*"
 
 Outputs:
   GitHubRoleArn:

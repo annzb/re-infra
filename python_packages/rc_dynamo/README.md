@@ -277,7 +277,6 @@ compose-build-test.yaml  builds both images; LocalStack + the test image = the g
 
 ### What CI does that you cannot
 
-Pushing the image to ECR under a branch tag and publishing the
-digest to SSM `/rc/dynamo/image-uri` both happen only in
-[`.github/workflows/build.yml`](../../.github/workflows/build.yml). Everything it
-checks, you can run locally with the commands above.
+Pushing the image to ECR under a branch tag is the one thing that happens only in
+[`.github/workflows/deploy-images.yml`](../../.github/workflows/deploy-images.yml).
+Everything it checks, you can run locally with the commands above.

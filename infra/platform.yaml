@@ -4,10 +4,6 @@ Description: >
   the Lambda base image built from python_packages/rc_dynamo. Deployed by
   `rc-infra apply`.
 
-# The current base-image digest is published to SSM (/rc/dynamo/image-uri)
-# by .github/workflows/build.yml, not by this stack, so every build does not
-# register as drift.
-
 Resources:
   DynamoImageRepository:
     Type: AWS::ECR::Repository

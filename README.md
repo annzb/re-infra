@@ -36,14 +36,14 @@ Configure these under **Settings â†’ Secrets and variables â†’ Actions
 | `AWS_ROLE_GITHUB` | `GitHubRoleArn` output of `rc-bootstrap` | The only GitHub OIDC role. Every branch assumes it to publish its image; `main` additionally uses it for infrastructure applies. |
 | `AWS_ROLE_CFN` | `CloudFormationExecutionRoleArn` output of `rc-bootstrap` | Role passed to CloudFormation while it evaluates or executes change sets. |
 
-The workflows expose `AWS_ROLE_CFN` to the Python CLI as `RC_INFRA_CFN_ROLE_ARN`. Do not create a separate repository variable named `RC_INFRA_CFN_ROLE_ARN`.
+The workflows pass `AWS_ROLE_CFN` through to the Python CLI under the same name; it is the default for `--cfn-role-arn`.
 
 ### Local environment variables
 
 | Variable | Required? | Purpose |
 |---|---|---|
 | `AWS_PROFILE` | Optional | Selects a local AWS CLI/SDK profile, commonly an SSO profile. |
-| `RC_INFRA_CFN_ROLE_ARN` | Recommended for `apply` | Default for the CLI's `--cfn-role-arn` option. CloudFormation assumes this role. |
+| `AWS_ROLE_CFN` | Recommended for `apply` | Default for the CLI's `--cfn-role-arn` option. CloudFormation assumes this role. |
 | `AWS_REGION` | Optional locally | Useful for direct AWS CLI commands and required by the LocalStack test command. `rc-infra` itself reads the target region from `envs.yaml`. |
 
 `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID=test`, and `AWS_SECRET_ACCESS_KEY=test` are used only for the guarded LocalStack integration suite described below.
@@ -54,34 +54,34 @@ A push is the only trigger, and exactly one entry point runs: [`main.yml`](.gith
 
 ### Every branch except main — `non-main.yml`
 
-1. **Validate** ([`validate.yml`](.github/workflows/validate.yml)) installs the root project, runs Ruff, mypy, and pytest, runs `cfn-lint` on `infra/*.yaml`, and runs `rc-infra validate` on `envs.yaml`.
-2. **Build** ([`build.yml`](.github/workflows/build.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-build-test.yaml`](python_packages/rc_dynamo/compose-build-test.yaml), and pushes it to `rc-dynamo:<branch>`. It does not touch the SSM digest.
+1. **Validate** ([`validate.yml`](.github/workflows/validate.yml)) checks the lockfile (`uv lock --check`), installs the root project from it, runs Ruff, mypy, and pytest, runs `cfn-lint` on `infra/*.yaml`, and runs `rc-infra validate` on `envs.yaml`.
+2. **Deploy images** ([`deploy-images.yml`](.github/workflows/deploy-images.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-build-test.yaml`](python_packages/rc_dynamo/compose-build-test.yaml), and pushes it to `rc-dynamo:<branch>`.
 
 A branch run reaches AWS only to push its own image tag; it never deploys infrastructure, and a branch deletion is skipped rather than rebuilt. To see what a change would do to live infrastructure, run a local dry run (section 3).
 
 ### Pushes to main — `main.yml`
 
 1. **Validate** — the same workflow, unchanged.
-2. **Deploy environments** ([`deploy-envs.yml`](.github/workflows/deploy-envs.yml)) starts after validation.
+2. **Deploy infrastructure** ([`deploy-infra.yml`](.github/workflows/deploy-infra.yml)) starts after validation and applies `envs.yaml` together with `infra/*.yaml`.
    - It assumes `AWS_ROLE_GITHUB` through GitHub OIDC and passes `AWS_ROLE_CFN` to CloudFormation.
-   - It repeats the inexpensive template and config validation, then runs `rc-infra apply --yes`, which prints the plan, refuses it if anything is `BLOCKED`, and otherwise creates, imports, updates, or removes infrastructure until AWS matches `envs.yaml`.
-3. **Build** starts only after the environment deployment finishes successfully.
+   - It runs `rc-infra apply --yes`, which prints the plan, refuses it if anything is `BLOCKED`, and otherwise creates, imports, updates, or removes infrastructure until AWS matches `envs.yaml`. It does not repeat the validation stage's checks.
+3. **Deploy images** starts only after the infrastructure deployment finishes successfully.
    - The same single job runs.
-   - Because the branch is `main`, it pushes `rc-dynamo:main`, then writes the new digest to `/rc/dynamo/image-uri`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
+   - Because the branch is `main`, it pushes `rc-dynamo:main`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
 
-The build workflow builds the image once and loads it locally; the tests, the smoke test and the push all run against that same loaded image, so an untested rebuild can never reach ECR.
+One `docker compose build` produces the base image and the test image as a single linked build graph, and the push comes after the suite passes, so an untested image can never reach ECR - the suite runs against exactly the bits that get pushed.
 
 ### Workflow responsibilities
 
 | Workflow | Trigger | Responsibility | AWS access |
 |---|---|---|---|
-| `main.yml` | push to `main` | Entry point; orders validate, deploy, build | None of its own; grants OIDC to the jobs it calls. |
+| `main.yml` | push to `main` | Entry point; orders validate, infrastructure, images | None of its own; grants OIDC to the jobs it calls. |
 | `non-main.yml` | push to any other branch | Entry point; validation and image build/test only | None. |
 | `validate.yml` | `workflow_call` | Lint, type-check, test, `cfn-lint`, `rc-infra validate` | None. |
-| `deploy-envs.yml` | `workflow_call` | Reconciles `rc-platform` and `rc-env-*`; tears down environments removed from `envs.yaml` | Main only, using the GitHub role and the CloudFormation execution role. |
-| `build.yml` | `workflow_call` | Builds, tests and publishes the Lambda base image in one job | Every branch pushes its own tag using the GitHub role; `main` also writes the SSM digest. |
+| `deploy-infra.yml` | `workflow_call` | Applies `infra/*.yaml` for `envs.yaml`: reconciles `rc-platform` and `rc-env-*`, and tears down environments removed from `envs.yaml` | Main only, using the GitHub role and the CloudFormation execution role. |
+| `deploy-images.yml` | `workflow_call` | Builds, tests and publishes the Lambda base image in one job | Every branch pushes its own tag using the GitHub role. |
 
-A called workflow must never declare the same concurrency group as its caller: GitHub reports that as a deadlock and cancels the run. The entry points own `re-infra-<ref>`, `deploy-envs.yml` serializes on `re-infra-deploy`, and `validate.yml` declares none.
+A called workflow must never declare the same concurrency group as its caller: GitHub reports that as a deadlock and cancels the run. Serialization therefore lives entirely in the entry points, which own `re-infra-<ref>`; `main.yml` sets `cancel-in-progress: false` so an apply already in flight is never cancelled, while `non-main.yml` replaces superseded branch runs. None of the three called workflows declares a group of its own.
 
 ### Stack ownership
 
@@ -130,7 +130,7 @@ Unknown fields are rejected. Environment names must match `^[a-z][a-z0-9]{1,19}$
    ```bash
    uv run rc-infra validate
    aws sso login --profile <profile>
-   AWS_PROFILE=<profile> RC_INFRA_CFN_ROLE_ARN=<execution-role-arn> uv run rc-infra apply
+   AWS_PROFILE=<profile> AWS_ROLE_CFN=<execution-role-arn> uv run rc-infra apply
    ```
 
    Without `--yes`, `apply` is a dry run: it prints the plan and changes nothing.
@@ -204,7 +204,7 @@ Without `--yes` it stops there: a dry run that modifies nothing. Building the pl
 
 With `--yes`, it refuses any plan containing `BLOCKED`, then applies creates/imports/updates before deletions. Failures in one environment are recorded without preventing independent environments from being attempted; any failure produces a nonzero exit code.
 
-`--cfn-role-arn` defaults to `RC_INFRA_CFN_ROLE_ARN` and identifies the role CloudFormation assumes when evaluating the template.
+`--cfn-role-arn` defaults to `AWS_ROLE_CFN` and identifies the role CloudFormation assumes when evaluating the template.
 
 Routine applies belong in the protected main-branch workflow, not on developer machines.
 
@@ -236,16 +236,16 @@ The image contains:
 - the `rc_dynamo` package, including the generic DynamoDB schema framework;
 - the `rc-dynamo-sync` and `rc-dynamo-report` console commands.
 
-It intentionally contains no Lambda handler/CMD, pytest, uv, source tests, or service-specific libraries - the test tooling is locked in a separate project under `tests/` and only ever enters the throwaway test image. Application Dockerfiles must inherit from the immutable digest published in `/rc/dynamo/image-uri`, not from a branch tag: every tag moves.
+It intentionally contains no Lambda handler/CMD, pytest, uv, source tests, or service-specific libraries - the test tooling is locked in a separate project under `tests/` and only ever enters the throwaway test image. Application Dockerfiles must inherit from an immutable digest, not from a branch tag: every tag moves. Resolve the current one from ECR - `aws ecr describe-images --repository-name rc-dynamo --image-ids imageTag=main --query 'imageDetails[0].imageDigest' --output text` - and pin `<registry>/rc-dynamo@<digest>`.
 
 ### Change reusable code
 
 1. Edit `python_packages/rc_dynamo/src/rc_dynamo/`.
 2. Update unit or integration tests under `python_packages/rc_dynamo/tests/`.
 3. Run the checks - see [the package README](python_packages/rc_dynamo/README.md#2-local-development) for the dependency, venv and test-pipeline commands.
-4. Push the branch. It is built, tested and published as `rc-dynamo:<branch>`, so it can be pulled and tried before merging. Merging to `main` moves `rc-dynamo:main` and republishes the digest.
+4. Push the branch. It is built, tested and published as `rc-dynamo:<branch>`, so it can be pulled and tried before merging. Merging to `main` moves `rc-dynamo:main`.
 
-Every push republishes the tested image under a tag named after its branch, overwriting what that tag pointed at. There is no `latest`: a push to `main` moves `rc-dynamo:main` and writes the new immutable repository digest to `/rc/dynamo/image-uri`. There are no per-build tags; each image carries `org.opencontainers.image.revision` with the commit it was built from. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
+Every push republishes the tested image under a tag named after its branch, overwriting what that tag pointed at. There is no `latest`, and there are no per-build tags: a push to `main` moves `rc-dynamo:main`, and the only immutable identity is the repository digest ECR assigns. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
 
 Because tags move, the image a tag previously pointed at becomes untagged, and `rc-platform`'s lifecycle rule expires untagged images after **30 days**. That window is also the rollback window: refresh any digest pinned in `retribalize-core` within it, or the pin stops resolving.
 
@@ -275,7 +275,7 @@ uv run rc-infra validate
 ```bash
 aws sso login --profile <profile>
 export AWS_PROFILE=<profile>
-export RC_INFRA_CFN_ROLE_ARN=<rc-infra-cfn-exec-arn>
+export AWS_ROLE_CFN=<rc-infra-cfn-exec-arn>
 uv run rc-infra apply        # no --yes: prints the plan, changes nothing
 ```
 
@@ -287,8 +287,8 @@ The package has its own venv, image and test pipeline. The whole gate - ruff, my
 
 ```bash
 cd python_packages/rc_dynamo
-BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
-docker compose -f compose-build-test.yaml run --rm --build tests
+BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build
+docker compose -f compose-build-test.yaml run --rm tests
 docker compose -f compose-build-test.yaml down -v
 ```
 
@@ -299,13 +299,12 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
 | Operation | Local | GitHub workflow |
 |---|---|---|
 | Validate config/templates and run tests | Yes | Every push |
-| Build and smoke-test the base image | Yes | Every push |
+| Build the base image | Yes | Every push |
 | Run LocalStack integration tests | Yes | Every push |
-| Compare desired infrastructure with AWS | Yes, with suitable local AWS credentials | Main only, inside the deploy stage |
+| Compare desired infrastructure with AWS | Yes, with suitable local AWS credentials | Main only, inside the infrastructure stage |
 | Assume the GitHub OIDC role | No; its trust policy accepts only GitHub Actions tokens from this repository | Yes |
 | Apply environment infrastructure | Technically possible with separately authorized local credentials, but not the normal path | Main only |
 | Publish the tested image under its branch tag | Not reproduced by the documented local commands | Every push |
-| Publish the digest to SSM | Not reproduced by the documented local commands | Main only |
 
 ## 7. Integration contract with `retribalize-core`
 
@@ -313,7 +312,7 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
 
 - refuse to deploy when the target `rc-env-<name>` stack/SSM configuration does not exist;
 - read environment configuration from `/rc/env/<name>/*` rather than maintaining another environment map;
-- build service images from the immutable digest in `/rc/dynamo/image-uri` and record that digest in its build manifest, refreshing it within 30 days of being superseded;
+- build service images from the immutable digest of `rc-dynamo:main`, resolved from ECR rather than from a branch tag, and record that digest in its build manifest, refreshing it within 30 days of being superseded;
 - export `TABLES: Mapping[str, BaseTable]` from its schema module and invoke `rc-dynamo-sync --schema-module <module> --environment <name> --apply`;
 - own all `rc-app-<name>` application stacks and service releases.
 
@@ -336,7 +335,7 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
    Add `CreateOidcProvider=true` only when the AWS account does not already have the GitHub Actions OIDC provider.
 
 2. Copy the two stack output ARNs into `AWS_ROLE_GITHUB` and `AWS_ROLE_CFN`, and add `AWS_REGION=us-east-1`.
-3. Protect `main`: require CODEOWNERS review and the checks from `non-main.yml`, which is what runs on a pull request's source branch. A called workflow reports its checks as `<calling job> / <called job>`, so the validation check is named `validate / Lint, test, validate`. Jobs that exist only in `main.yml`, such as `deploy-envs`, can never be required checks. Block force pushes and branch deletion.
+3. Protect `main`: require CODEOWNERS review and the checks from `non-main.yml`, which is what runs on a pull request's source branch. A called workflow reports its checks as `<calling job> / <called job>`, so the validation check is named `validate / Lint, test, validate`. The image check is named `deploy-images / Build, test, and publish`. Jobs that exist only in `main.yml`, such as `deploy-infra`, can never be required checks. Block force pushes and branch deletion.
 4. Before the first main apply, run `rc-infra apply` without `--yes` using authorized local credentials. Existing buckets should appear as `IMPORT`. If an import is `BLOCKED`, modify the template to match the live bucket before applying; do not modify production data merely to satisfy the template.
 
 ## 9. Troubleshooting

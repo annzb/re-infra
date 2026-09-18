@@ -7,6 +7,10 @@ name: Build
 # - "on: workflow_call" is intended here - it is not an entrypoint workflow.
 # - Do not add a "concurrency" block.
 # - Steps use simplified actions like "actions/checkout@v7" for readability - do not replace with exact commit hashes.
+# - The test pipeline is deliberately NOT spelled out here. Linting, type checking,
+#   unit tests and the LocalStack integration suite all live in
+#   python_packages/rc_dynamo/compose-tests.yaml and tests/run-checks.sh, so CI and a
+#   developer's laptop run the same commands. Add checks there, not here.
 # - ...
 
 on:
@@ -30,59 +34,14 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: images/lambda-base
-    services:
-      localstack:
-        image: localstack/localstack:3
-        ports:
-          - 4566:4566
-        env:
-          SERVICES: s3,dynamodb
-        options: >-
-          --health-cmd "curl -fsS http://localhost:4566/_localstack/health"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 30
+        working-directory: python_packages/rc_dynamo
     steps:
       # fetch current repo
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      # install uv
-      - uses: astral-sh/setup-uv@v10
-        with:
-          # uv-specific cache
-          enable-cache: true
-
-      # install python dependencies
-      - name: Install
-        run: |
-          uv lock --check
-          uv sync --frozen
-
-      # ruff for code format, mypy for type checking
-      - name: Lint
-        run: |
-          uv run ruff check src tests
-          uv run ruff format --check src tests
-          uv run mypy
-
-      - name: Unit tests
-        run: uv run pytest tests/unit
-
-      # These variables belong to this step alone. At job level, AWS_ENDPOINT_URL and
-      # the dummy credentials would redirect the ECR and SSM calls below at LocalStack.
-      - name: Integration tests (LocalStack)
-        env:
-          AWS_ENDPOINT_URL: http://localhost:4566
-          AWS_ACCESS_KEY_ID: test
-          AWS_SECRET_ACCESS_KEY: test
-          AWS_REGION: us-east-1
-          AWS_DEFAULT_REGION: us-east-1
-          DYNAMO_SCHEMA_TEST_PREFIX: rc-ci-schema-sync-test
-        run: uv run pytest tests/integration
-
+      # AWS comes first: the ECR registry host is part of the image tags resolved below.
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_GITHUB }}
@@ -91,38 +50,58 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
         id: ecr
 
-      # setup image builder
+      # Set up a container-driver builder for the image build (it is what supports the
+      # gha cache), but leave it unselected: the compose build below layers onto an
+      # image that exists only in the local daemon, which only the default "docker"
+      # driver can see.
       - uses: docker/setup-buildx-action@v4
+        id: buildx
+        with:
+          use: false
 
       # One moving tag per branch, plus "latest" for main. A ref such as "feature/x"
       # is not a legal Docker tag, so anything outside [A-Za-z0-9_.-] becomes a dash.
+      # "rc-dynamo:local" is added as well: it is the tag compose-tests.yaml expects,
+      # so the test image layers onto the image built here rather than rebuilding it.
       - name: Resolve image tags
         id: meta
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
-          repository="${REGISTRY}/rc-lambda-base"
+          repository="${REGISTRY}/rc-dynamo"
           tag=$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-128)
           tags="${repository}:${tag}"
           if [ "$GITHUB_REF_NAME" = "main" ]; then
             tags="${tags},${repository}:latest"
           fi
+          tags="${tags},rc-dynamo:local"
           {
             echo "repository=$repository"
             echo "tag=$tag"
             echo "tags=$tags"
           } >> "$GITHUB_OUTPUT"
 
-      # Loaded, not pushed: the smoke test below runs first, so an untested image can
-      # never reach ECR.
+      # Loaded, not pushed: the tests and the smoke test below run first, so an
+      # untested image can never reach ECR.
       - uses: docker/build-push-action@v7
         with:
-          context: images/lambda-base
+          # This input is repo-root-relative and ignores the job's working-directory.
+          context: python_packages/rc_dynamo
+          builder: ${{ steps.buildx.outputs.name }}
           tags: ${{ steps.meta.outputs.tags }}
           build-args: REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           load: true
+
+      # ruff, mypy, unit tests and the LocalStack integration suite, against the image
+      # that was just built. Only the thin test layer is built here.
+      - name: Test
+        run: docker compose -f compose-tests.yaml run --rm --build tests
+
+      - name: Tear down the test stack
+        if: always()
+        run: docker compose -f compose-tests.yaml down -v
 
       # The published image must hold the package and console scripts, and must not
       # hold the test tooling.
@@ -131,7 +110,7 @@ jobs:
           IMAGE: ${{ steps.meta.outputs.repository }}:${{ steps.meta.outputs.tag }}
         run: |
           docker run --rm --entrypoint python "$IMAGE" -c \
-            "import sys, rc_lambda_base, rc_lambda_base.dynamo.cli; assert sys.version_info[:2] == (3, 11)"
+            "import sys, rc_dynamo, rc_dynamo.cli; assert sys.version_info[:2] == (3, 11)"
           docker run --rm --entrypoint rc-dynamo-sync "$IMAGE" --help
           docker run --rm --entrypoint rc-dynamo-report "$IMAGE" --help
           if docker run --rm --entrypoint python "$IMAGE" -c "import pytest" 2>/dev/null; then
@@ -149,7 +128,7 @@ jobs:
           if [ "$GITHUB_REF_NAME" = "main" ]; then
             docker push "${REPOSITORY}:latest"
           fi
-          digest=$(aws ecr describe-images --repository-name rc-lambda-base \
+          digest=$(aws ecr describe-images --repository-name rc-dynamo \
             --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
@@ -167,9 +146,9 @@ jobs:
             echo "- Digest: \`${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$GITHUB_REF_NAME" != "main" ]; then
-            echo "Branch build: /rc/lambda-base/image-uri is left unchanged."
+            echo "Branch build: /rc/dynamo/image-uri is left unchanged."
             exit 0
           fi
-          aws ssm put-parameter --name /rc/lambda-base/image-uri --type String --overwrite \
+          aws ssm put-parameter --name /rc/dynamo/image-uri --type String --overwrite \
             --value "${REPOSITORY}@${DIGEST}"
           echo "- Pin in retribalize-core: \`${REPOSITORY}@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"

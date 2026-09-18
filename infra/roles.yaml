@@ -200,14 +200,14 @@ Resources:
                   - ecr:PutImage
                   - ecr:UploadLayerPart
                 Resource:
-                  Fn::Sub: "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/rc-lambda-base"
+                  Fn::Sub: "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/rc-dynamo"
               - Sid: PublishLambdaBaseDigest
                 Effect: Allow
                 Action:
                   - ssm:GetParameter
                   - ssm:PutParameter
                 Resource:
-                  Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/rc/lambda-base/*"
+                  Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/rc/dynamo/*"
 
 Outputs:
   GitHubRoleArn:

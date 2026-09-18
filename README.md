@@ -49,7 +49,7 @@ A push is the only trigger, and exactly one entry point runs: [`main.yml`](.gith
 ### Every branch except main — `non-main.yml`
 
 1. **Validate** ([`validate.yml`](.github/workflows/validate.yml)) installs the root project, runs Ruff, mypy, and pytest, runs `cfn-lint` on `infra/*.yaml`, and runs `rc-infra validate` on `envs.yaml`.
-2. **Build** ([`build.yml`](.github/workflows/build.yml)) starts after validation. In a single job it runs the `rc_lambda_base` suites against LocalStack, builds the image, smoke-tests it, and pushes it to `rc-lambda-base:<branch>`. It does not move `latest` and does not touch the SSM digest.
+2. **Build** ([`build.yml`](.github/workflows/build.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-tests.yaml`](python_packages/rc_dynamo/compose-tests.yaml), smoke-tests it, and pushes it to `rc-dynamo:<branch>`. It does not move `latest` and does not touch the SSM digest.
 
 A branch run reaches AWS only to push its own image tag; it never deploys infrastructure, and a branch deletion is skipped rather than rebuilt. To see what a change would do to live infrastructure, run a local dry run (section 3).
 
@@ -61,9 +61,9 @@ A branch run reaches AWS only to push its own image tag; it never deploys infras
    - It repeats the inexpensive template and config validation, then runs `rc-infra apply --yes`, which prints the plan, refuses it if anything is `BLOCKED`, and otherwise creates, imports, updates, or removes infrastructure until AWS matches `envs.yaml`.
 3. **Build** starts only after the environment deployment finishes successfully.
    - The same single job runs.
-   - Because the branch is `main`, it pushes both `rc-lambda-base:main` and `rc-lambda-base:latest`, then writes the new digest to `/rc/lambda-base/image-uri`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
+   - Because the branch is `main`, it pushes both `rc-dynamo:main` and `rc-dynamo:latest`, then writes the new digest to `/rc/dynamo/image-uri`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
 
-The build workflow passes the exact built image between jobs as a workflow artifact, so its publish job cannot substitute an untested rebuild.
+The build workflow builds the image once and loads it locally; the tests, the smoke test and the push all run against that same loaded image, so an untested rebuild can never reach ECR.
 
 ### Workflow responsibilities
 
@@ -82,7 +82,7 @@ A called workflow must never declare the same concurrency group as its caller: G
 | Stack/resource | Owner | Contents |
 |---|---|---|
 | `rc-bootstrap` | This repo; deployed manually once | The GitHub OIDC role and the CloudFormation execution role. |
-| `rc-platform` | This repo | ECR repository `rc-lambda-base`. |
+| `rc-platform` | This repo | ECR repository `rc-dynamo`. |
 | `rc-env-<name>` | This repo | Environment buckets and `/rc/env/<name>/*` SSM parameters. |
 | `rc-identity` | Future work | Shared Cognito resources; see [`infra/identity.md`](infra/identity.md). |
 | `rc-app-<name>` | `retribalize-core` | Application-specific SAM/CloudFormation resources. |
@@ -210,45 +210,36 @@ Routine applies belong in the protected main-branch workflow, not on developer m
 | `1` | Invalid config, account mismatch, blocked plan, or failed apply. |
 | `2` | Invalid command-line usage reported by `argparse`. |
 
-## 5. Lambda base image
+## 5. Reusable Python packages
 
-`images/lambda-base` defines a parent image for Retribalize Python Lambda services. It centralizes slow, app-independent dependencies and reusable infrastructure code while leaving handlers and service-specific dependencies to child images.
+`python_packages/` holds the reusable libraries this repository publishes. Each is a self-contained uv project with its own lockfile, Dockerfile and test pipeline, and its own README.
+
+| Package | What it is |
+|---|---|
+| [`rc_dynamo`](python_packages/rc_dynamo/README.md) | A declarative DynamoDB layer - typed CRUD, index-aware queries, schema drift detection and migration - published as the Lambda parent image `rc-dynamo`. |
+
+### The `rc-dynamo` Lambda parent image
+
+`python_packages/rc_dynamo` also defines the parent image for Retribalize Python Lambda services. It centralizes slow, app-independent dependencies and reusable infrastructure code while leaving handlers and service-specific dependencies to child images.
 
 The image contains:
 
 - the AWS Lambda Python 3.11 base image, pinned by digest and built for `linux/amd64`;
 - the Datadog Lambda Extension, disabled by default;
 - locked production dependencies (`boto3` and `pydantic` currently);
-- the `rc_lambda_base` package, including the generic DynamoDB schema framework;
+- the `rc_dynamo` package, including the generic DynamoDB schema framework;
 - the `rc-dynamo-sync` and `rc-dynamo-report` console commands.
 
-It intentionally contains no Lambda handler/CMD, pytest, uv, source tests, or service-specific libraries. Application Dockerfiles must inherit from the immutable digest published in `/rc/lambda-base/image-uri`, not directly from the mutable `latest` tag.
+It intentionally contains no Lambda handler/CMD, pytest, uv, source tests, or service-specific libraries - the test tooling is locked in a separate project under `tests/` and only ever enters the throwaway test image. Application Dockerfiles must inherit from the immutable digest published in `/rc/dynamo/image-uri`, not directly from the mutable `latest` tag.
 
-### Update a dependency
+### Change reusable code
 
-```bash
-cd images/lambda-base
-uv add "<package><version-constraint>"       # production dependency
-uv add --dev "<package><version-constraint>" # test/development dependency
-uv lock --check
-uv run pytest
-```
+1. Edit `python_packages/rc_dynamo/src/rc_dynamo/`.
+2. Update unit or integration tests under `python_packages/rc_dynamo/tests/`.
+3. Run the checks - see [the package README](python_packages/rc_dynamo/README.md#2-local-development) for the dependency, venv and test-pipeline commands.
+4. Push the branch. It is built, tested and published as `rc-dynamo:<branch>`, so it can be pulled and tried before merging. Merging to `main` moves `main` and `latest` and republishes the digest.
 
-Upgrade or remove an existing dependency with:
-
-```bash
-uv lock --upgrade-package <package>
-uv remove <package>
-```
-
-### Update reusable code
-
-1. Edit `images/lambda-base/src/rc_lambda_base/`.
-2. Update unit or integration tests under `images/lambda-base/tests/`.
-3. Run the checks from the next section.
-4. Push the branch. It is built, tested and published as `rc-lambda-base:<branch>`, so it can be pulled and tried before merging. Merging to `main` moves `main` and `latest` and republishes the digest.
-
-Every push republishes the tested image under a tag named after its branch, overwriting what that tag pointed at. A push to `main` additionally moves `latest` and writes the new immutable repository digest to `/rc/lambda-base/image-uri`. There are no per-build tags; each image carries `org.opencontainers.image.revision` with the commit it was built from. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
+Every push republishes the tested image under a tag named after its branch, overwriting what that tag pointed at. A push to `main` additionally moves `latest` and writes the new immutable repository digest to `/rc/dynamo/image-uri`. There are no per-build tags; each image carries `org.opencontainers.image.revision` with the commit it was built from. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
 
 Because tags move, the image a tag previously pointed at becomes untagged, and `rc-platform`'s lifecycle rule expires untagged images after **30 days**. That window is also the rollback window: refresh any digest pinned in `retribalize-core` within it, or the pin stops resolving.
 
@@ -284,38 +275,18 @@ uv run rc-infra apply        # no --yes: prints the plan, changes nothing
 
 The execution-role ARN can be copied from the `CloudFormationExecutionRoleArn` output of `rc-bootstrap`. Your local identity still needs permission to inspect resources, create/delete preview change sets, and pass that execution role.
 
-### Test the base package with LocalStack
+### Work on `rc_dynamo`
+
+The package has its own venv, image and test pipeline. The whole gate - ruff, mypy, unit tests and the LocalStack integration suite - is one command, and it is exactly what CI runs:
 
 ```bash
-cd images/lambda-base
-uv sync --frozen
-uv run pytest tests/unit
-
-docker compose up -d --wait
-AWS_ENDPOINT_URL=http://localhost:4566 \
-AWS_ACCESS_KEY_ID=test \
-AWS_SECRET_ACCESS_KEY=test \
-AWS_REGION=us-east-1 \
-DYNAMO_SCHEMA_TEST_PREFIX=rc-local-schema-sync-test \
-uv run pytest tests/integration
-docker compose down
+cd python_packages/rc_dynamo
+docker build --platform linux/amd64 -t rc-dynamo:local .
+docker compose -f compose-tests.yaml run --rm --build tests
+docker compose -f compose-tests.yaml down -v
 ```
 
-The integration suite rejects non-LocalStack endpoints and non-test credentials so it cannot accidentally operate on real tables.
-
-### Build and smoke-test the image locally
-
-```bash
-docker buildx build --platform linux/amd64 --load \
-  -t rc-lambda-base:local images/lambda-base
-
-docker run --rm --platform linux/amd64 --entrypoint python rc-lambda-base:local \
-  -c "import sys, rc_lambda_base, rc_lambda_base.dynamo.cli; assert sys.version_info[:2] == (3, 11)"
-docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-sync \
-  rc-lambda-base:local --help
-docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-report \
-  rc-lambda-base:local --help
-```
+See [the package README](python_packages/rc_dynamo/README.md#2-local-development) for venv setup, dependency changes, and running individual checks without Docker.
 
 ### Local versus workflow-only behavior
 
@@ -336,7 +307,7 @@ docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-report \
 
 - refuse to deploy when the target `rc-env-<name>` stack/SSM configuration does not exist;
 - read environment configuration from `/rc/env/<name>/*` rather than maintaining another environment map;
-- build service images from the immutable digest in `/rc/lambda-base/image-uri` and record that digest in its build manifest, refreshing it within 30 days of being superseded;
+- build service images from the immutable digest in `/rc/dynamo/image-uri` and record that digest in its build manifest, refreshing it within 30 days of being superseded;
 - export `TABLES: Mapping[str, BaseTable]` from its schema module and invoke `rc-dynamo-sync --schema-module <module> --environment <name> --apply`;
 - own all `rc-app-<name>` application stacks and service releases.
 
@@ -369,5 +340,5 @@ docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-report \
 - **Inspect an environment stack:** `aws cloudformation describe-stacks --stack-name rc-env-<name>`.
 - **Inspect published config:** `aws ssm get-parameters-by-path --path /rc/env/<name>/ --recursive`.
 - **Resolve `BLOCKED`:** read the action details. Busy/broken CloudFormation stacks must stabilize or be repaired; import candidates require the template to match live bucket settings.
-- **Roll back the base image:** pin a prior immutable ECR digest in `retribalize-core`. List what is still available with `aws ecr describe-images --repository-name rc-lambda-base`; tags name the branch they came from, and superseded images are untagged and expire 30 days later.
+- **Roll back the base image:** pin a prior immutable ECR digest in `retribalize-core`. List what is still available with `aws ecr describe-images --repository-name rc-dynamo`; tags name the branch they came from, and superseded images are untagged and expire 30 days later.
 - **Avoid console drift:** do not repair stack-owned resources manually in the AWS console. Change `infra/*.yaml` or `envs.yaml` and apply through the workflow.

@@ -7,5 +7,5 @@
 /src/rc_infra/              @annzb
 /.github/workflows/         @annzb
 
-# Every Lambda image is built from this.
-/images/lambda-base/        @annzb
+# Reusable packages. The Lambda base image is built from rc_dynamo.
+/python_packages/           @annzb

@@ -14,11 +14,17 @@ updates:
       interval: weekly
 
   - package-ecosystem: uv
-    directory: /images/lambda-base
+    directory: /python_packages/rc_dynamo
+    schedule:
+      interval: weekly
+
+  # The test project locks its tooling separately from the published package.
+  - package-ecosystem: uv
+    directory: /python_packages/rc_dynamo/tests
     schedule:
       interval: weekly
 
   - package-ecosystem: docker
-    directory: /images/lambda-base
+    directory: /python_packages/rc_dynamo
     schedule:
       interval: weekly

@@ -1,0 +1,54 @@
+# The whole test pipeline for rc-dynamo: ruff, mypy, unit tests, and the
+# LocalStack-backed schema-sync integration suite. The steps themselves live in
+# tests/run-checks.sh, so CI and a laptop run exactly the same thing.
+#
+#   docker build --platform linux/amd64 -t rc-dynamo:local .
+#   docker compose -f compose-tests.yaml run --rm --build tests
+#   docker compose -f compose-tests.yaml down -v
+#
+# The core image has to exist first: only the thin test layer is built here.
+# build.yml tags the image it just built as rc-dynamo:local so the default
+# applies; BASE_IMAGE overrides it if you keep the core image under another tag.
+#
+# Because the test image is layered on an image held only in the local daemon, the
+# build has to run on a builder that can see it - that is, one using the "docker"
+# driver, which is the default. If `docker buildx ls` shows a docker-container
+# builder as current, point compose at a docker-driver one:
+#   BUILDX_BUILDER=desktop-linux docker compose -f compose-tests.yaml run --rm --build tests
+name: rc-dynamo-tests
+
+services:
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: s3,dynamodb
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  tests:
+    # linux/amd64 throughout, matching the core image and Lambda. On an arm64 host
+    # this runs emulated; without it the build cannot resolve the local core image.
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: tests.Dockerfile
+      platforms:
+        - linux/amd64
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-rc-dynamo:local}
+    depends_on:
+      localstack:
+        condition: service_healthy
+    environment:
+      # The integration suite refuses to run against anything but LocalStack.
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      DYNAMO_SCHEMA_TEST_PREFIX: ${DYNAMO_SCHEMA_TEST_PREFIX:-rc-local-schema-sync-test}

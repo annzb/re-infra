@@ -1,0 +1,16 @@
+# Allowlist. The core image (Dockerfile) needs only the project metadata, the
+# lockfile, and the package source; tests/ is here for tests.Dockerfile, which
+# shares this build context. Nothing under tests/ can reach the core image: the
+# wheel is built from src/rc_dynamo alone and the dependency layer is exported
+# from uv.lock, which holds no test tooling.
+*
+!pyproject.toml
+!uv.lock
+!src/
+!tests/
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache

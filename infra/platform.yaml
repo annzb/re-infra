@@ -1,19 +1,20 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Retribalize shared platform resources (stack rc-platform): the repository for
-  the Lambda base image. Deployed by `rc-infra apply`.
+  the Lambda base image built from python_packages/rc_dynamo. Deployed by
+  `rc-infra apply`.
 
-# The current base-image digest is published to SSM (/rc/lambda-base/image-uri)
+# The current base-image digest is published to SSM (/rc/dynamo/image-uri)
 # by .github/workflows/build.yml, not by this stack, so every build does not
 # register as drift.
 
 Resources:
-  LambdaBaseRepository:
+  DynamoImageRepository:
     Type: AWS::ECR::Repository
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      RepositoryName: rc-lambda-base
+      RepositoryName: rc-dynamo
       # Every tag moves: one tag per branch, rewritten on each push to that branch,
       # plus "latest" tracking main. Immutable identity comes from the digest.
       ImageTagMutability: MUTABLE
@@ -50,6 +51,6 @@ Resources:
               - ecr:GetDownloadUrlForLayer
 
 Outputs:
-  LambdaBaseRepositoryUri:
+  DynamoImageRepositoryUri:
     Value:
-      Fn::GetAtt: [LambdaBaseRepository, RepositoryUri]
+      Fn::GetAtt: [DynamoImageRepository, RepositoryUri]

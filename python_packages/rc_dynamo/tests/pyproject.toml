@@ -1,0 +1,36 @@
+# The test project. Separate from ../pyproject.toml so that pytest, mypy and ruff
+# never enter the published image's dependency closure.
+#
+# Commands run from the package root (python_packages/rc_dynamo), not from here:
+#   uv sync --project tests
+#   uv run --project tests pytest tests/unit
+# `--project` selects this project without changing the working directory, which is
+# what keeps `tests.integration.schema_sync.schema_cases` importable.
+
+[project]
+name = "rc-dynamo-tests"
+version = "0.1.0"
+description = "Test suite and quality gate for rc-dynamo."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "rc-dynamo",
+    "mypy>=1.18",
+    "pytest>=9.1.1",
+    "ruff>=0.14",
+]
+
+[tool.uv]
+# A virtual project: there is nothing here to build or install.
+package = false
+
+[tool.uv.sources]
+rc-dynamo = { path = "..", editable = true }
+
+[tool.pytest.ini_options]
+# Paths are relative to the rootdir, which pytest resolves to this directory.
+# The LocalStack suite runs explicitly: pytest tests/integration
+testpaths = ["unit"]
+
+[tool.ruff]
+# One line length and one rule set for the whole package.
+extend = "../pyproject.toml"

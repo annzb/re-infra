@@ -5,15 +5,15 @@
 # rc_dynamo exactly as it ships - the same interpreter, the same installed
 # package - instead of a separate editable copy.
 #
-# Driven by compose-build-test.yaml, which supplies BASE_IMAGE and LocalStack. There is
-# deliberately no fallback tag: the base image is always named in full, so the suite
-# can only ever run against an image someone asked for.
-
-ARG BASE_IMAGE
+# Driven by compose-build-test.yaml, which passes the core image in as the
+# "rc_dynamo_base" build context and supplies LocalStack. The base image is never named
+# here: compose hands over the output of its own "base" build, so the suite always runs
+# against exactly the bits that get pushed. Building this file on its own therefore needs
+# that context: docker build --build-context rc_dynamo_base=docker-image://<ref> ...
 
 FROM ghcr.io/astral-sh/uv:0.12.15 AS uv
 
-FROM ${BASE_IMAGE}
+FROM rc_dynamo_base
 
 # uv stays in this image so run-checks.sh can verify both lockfiles.
 COPY --from=uv /uv /bin/uv

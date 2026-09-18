@@ -206,19 +206,19 @@ Unit tests need no AWS and no Docker.
 
 ### Build the image
 
-[`compose-build-test.yaml`](compose-build-test.yaml) builds it, under the one name
-the image has everywhere - `<registry>/rc-dynamo:<tag>`. On a laptop the registry and
-tag are whatever you like; `rc-local` and `dev` are the defaults, so use them and
-nothing else needs setting. `BUILD_CACHE_TO=type=inline` is needed because the default
-buildx driver cannot export the GitHub Actions cache the file asks for on CI; the file
-header explains it.
+[`compose-build-test.yaml`](compose-build-test.yaml) builds it, under the one name the
+image has everywhere - `<registry>/rc-dynamo:<tag>`. The defaults are the real ECR registry
+and `latest`; export `ECR_REGISTRY` or `IMAGE_TAG` to build under a different name.
+`BUILD_CACHE_TO=type=inline` is needed because the default buildx driver cannot export the
+GitHub Actions cache the file asks for on CI; the file header explains it.
 
 ```bash
 BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
 
-docker run --rm --platform linux/amd64 --entrypoint python rc-local/rc-dynamo:dev \
+IMAGE=273268178059.dkr.ecr.us-east-1.amazonaws.com/rc-dynamo:latest
+docker run --rm --platform linux/amd64 --entrypoint python "$IMAGE" \
   -c "import sys, rc_dynamo, rc_dynamo.cli; assert sys.version_info[:2] == (3, 11)"
-docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-sync rc-local/rc-dynamo:dev --help
+docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-sync "$IMAGE" --help
 ```
 
 ### Run the full test pipeline
@@ -226,28 +226,24 @@ docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-sync rc-local/rc-d
 [`compose-build-test.yaml`](compose-build-test.yaml) is the whole gate — lockfile
 checks, ruff, mypy, unit tests, and the LocalStack integration suite — and it is
 exactly what CI runs. [`tests.Dockerfile`](tests.Dockerfile) layers the test tooling
-and the suite onto the image built above, so the suite exercises the package as it
-ships.
+and the suite onto the base image, which compose hands it directly as the
+`rc_dynamo_base` build context - so the suite exercises the exact image that gets
+pushed, and `build` with no service name builds both.
 
 ```bash
-BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
-docker compose -f compose-build-test.yaml run --rm --build tests
+BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build
+docker compose -f compose-build-test.yaml run --rm tests
 docker compose -f compose-build-test.yaml down -v
 ```
 
 The steps themselves live in [`tests/run-checks.sh`](tests/run-checks.sh); add
 checks there and both CI and every laptop pick them up.
 
-If the core image is under a different name, export `ECR_REGISTRY` and `IMAGE_TAG` and
-compose will build `FROM` that one instead - which is exactly how CI points the test
-image at the image it just built.
-
 Two things to know:
 
-- The build has to run on a buildx builder that can see your local images, i.e.
-  one using the `docker` driver (the default). If `docker buildx ls` shows a
-  `docker-container` builder as current, prefix the command with
-  `BUILDX_BUILDER=desktop-linux`.
+- Both images are built as one linked graph, so any buildx driver works and the test
+  image never resolves the base image by name. This needs Docker Compose 2.37.3 or
+  newer - see the root README's prerequisites for why.
 - The integration suite refuses to run against anything but LocalStack: it
   asserts the endpoint is local, the credentials are `test`, and the table prefix
   contains `schema-sync-test`. It cannot touch a real table.

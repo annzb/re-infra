@@ -45,16 +45,11 @@ jobs:
       # set up image builder
       - uses: docker/setup-buildx-action@v4
         id: buildx
-        with:
-          # Left unselected on purpose: the test image builds FROM an image that exists
-          # only in the local daemon, which a docker-container builder cannot read, so
-          # that build has to run on the default "docker" driver.
-          use: false
 
       # set up build cache
       - uses: crazy-max/ghaction-github-runtime@v3
 
-      # name image name after current branch
+      # name image after current branch
       - name: Resolve the image name
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
@@ -66,24 +61,10 @@ jobs:
             echo "IMAGE=${REGISTRY}/rc-dynamo:${tag}"
           } >> "$GITHUB_ENV"
 
-      # Build the base image, then the test image on top of it, then run the suite: ruff,
-      # mypy, unit tests and the LocalStack integration suite. Neither image is pushed
-      # yet, so an untested one can never reach ECR. BUILDX_BUILDER applies to the base
-      # build alone - the test build needs the default driver, see the builder step above.
       - name: Build and test
         run: |
-          BUILDX_BUILDER=${{ steps.buildx.outputs.name }} \
-            docker compose -f compose-build-test.yaml build base
-          docker compose -f compose-build-test.yaml run --rm --build tests
+          docker compose -f compose-build-test.yaml build
+          docker compose -f compose-build-test.yaml run --rm tests
 
       - name: Push
         run: docker push "$IMAGE"
-
-      # The digest, not the tag, is what retribalize-core pins - and only main moves it.
-      - name: Publish the digest
-        if: github.ref_name == 'main'
-        run: |
-          digest=$(aws ecr describe-images --repository-name rc-dynamo \
-            --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)
-          aws ssm put-parameter --name /rc/dynamo/image-uri --type String --overwrite \
-            --value "${ECR_REGISTRY}/rc-dynamo@${digest}"

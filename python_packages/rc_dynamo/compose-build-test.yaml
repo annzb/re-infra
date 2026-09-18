@@ -2,42 +2,39 @@
 # tests, and the LocalStack-backed schema-sync integration suite. The steps themselves
 # live in tests/run-checks.sh, so CI and a laptop run exactly the same thing.
 #
-#   BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
-#   docker compose -f compose-build-test.yaml run --rm --build tests
+#   BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build
+#   docker compose -f compose-build-test.yaml run --rm tests
 #   docker compose -f compose-build-test.yaml down -v
 #
-# Two commands, not one, because the two builds need different buildx drivers:
+# "tests" takes the core image through the "rc_dynamo_base" build context rather than by
+# name, so the two builds are one linked graph: nothing round-trips through the local
+# image store, one builder does both, and the suite runs against the exact bits that get
+# pushed. That is why "docker compose build" builds both and why neither build needs a
+# particular buildx driver.
 #
-# - "base" carries a gha cache, which only a docker-container driver can export. CI
-#   points BUILDX_BUILDER at the builder setup-buildx-action created. The "docker"
-#   driver a laptop uses cannot export any cache but inline, hence BUILD_CACHE_TO above.
-#   BUILD_CACHE_FROM needs no override: importing a gha cache without an Actions token
-#   is a silent no-op, so the default is harmless off CI.
-# - "tests" layers onto the image "base" just built, which lives only in the local
-#   daemon. Only the "docker" driver can see it, so this build runs on the default
-#   builder and carries no cache. If `docker buildx ls` shows a docker-container builder
-#   as current, point compose at a docker-driver one:
-#     BUILDX_BUILDER=desktop-linux docker compose -f compose-build-test.yaml run --rm --build tests
+# BUILD_CACHE_TO is there because a laptop on the default "docker" driver cannot export
+# any cache but inline, while CI wants the GitHub Actions cache. BUILD_CACHE_FROM needs
+# no override: importing a gha cache without an Actions token is a silent no-op.
 name: rc-dynamo-build-test
 
-# One name for the image everywhere - there is no separate local alias. CI exports
-# ECR_REGISTRY and IMAGE_TAG from build.yml; the defaults are what a laptop gets.
+# The name the published image is pushed under. CI exports ECR_REGISTRY and IMAGE_TAG
+# from build.yml; the defaults are what a laptop gets. Only "base" needs it - the test
+# image is wired to that build directly and never resolves a name.
 x-image-ref: &image-ref ${ECR_REGISTRY:-273268178059.dkr.ecr.us-east-1.amazonaws.com}/rc-dynamo:${IMAGE_TAG:-latest}
 
 services:
-  # The published Lambda parent image. Build-only: "profiles" keeps "up" and "run" from
-  # ever starting it, since it is a runtime-interface image with no command of its own.
-  # Naming it explicitly still builds it - no --profile needed.
+  # The published Lambda parent image. It exists to be built, never started: it is a
+  # runtime-interface image with no command of its own, and nothing depends_on it, so
+  # "run tests" leaves it alone.
   base:
-    profiles: ["build"]
     image: *image-ref
     build:
       context: .
       dockerfile: Dockerfile
       platforms:
         - linux/amd64
-      cache_from: ["${BUILD_CACHE_FROM:-type=gha,scope=rc-dynamo}"]
-      cache_to: ["${BUILD_CACHE_TO:-type=gha,mode=max,scope=rc-dynamo}"]
+      cache_from: ["${BUILD_CACHE_FROM:-type=gha,scope=rc-dynamo-base}"]
+      cache_to: ["${BUILD_CACHE_TO:-type=gha,mode=max,scope=rc-dynamo-base}"]
 
   localstack:
     image: localstack/localstack:3
@@ -53,15 +50,19 @@ services:
 
   tests:
     # linux/amd64 throughout, matching the core image and Lambda. On an arm64 host
-    # this runs emulated; without it the build cannot resolve the local core image.
+    # this runs emulated.
     platform: linux/amd64
     build:
       context: .
       dockerfile: tests.Dockerfile
       platforms:
         - linux/amd64
-      args:
-        BASE_IMAGE: *image-ref
+      # Hands the "base" build's output to tests.Dockerfile's "FROM rc_dynamo_base",
+      # which is what links the two builds into one graph.
+      additional_contexts:
+        rc_dynamo_base: service:base
+      cache_from: ["${BUILD_CACHE_FROM:-type=gha,scope=rc-dynamo-tests}"]
+      cache_to: ["${BUILD_CACHE_TO:-type=gha,mode=max,scope=rc-dynamo-tests}"]
     depends_on:
       localstack:
         condition: service_healthy

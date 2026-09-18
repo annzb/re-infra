@@ -15,7 +15,13 @@ Application code, application-specific table declarations, service images, the S
 
 - Python 3.11, pinned by [`.python-version`](.python-version). `uv` can install it when missing.
 - [`uv`](https://docs.astral.sh/uv/).
-- Docker with Buildx for local base-image builds and LocalStack tests.
+- Docker with Buildx, and **Docker Compose 2.37.3 or newer**, for local base-image builds
+  and LocalStack tests. The floor is not cosmetic: the test image takes the base image
+  through a `service:` build context, which Compose only resolves from 2.33.0, only
+  handles correctly without Bake from 2.34.0, and only exports build caches under Bake
+  from 2.37.3. An older Compose silently treats `service:base` as a *directory name*, and
+  the build fails with `failed to get build context rc_dynamo_base: stat .../service:base:
+  no such file or directory`. If you see that, update Docker Desktop.
 - AWS CLI with credentials for account `273268178059` when running an AWS-backed dry run. The normal local option is an AWS SSO profile.
 
 The repository already contains `pyproject.toml` and `uv.lock`; do not run `uv init` after cloning it.

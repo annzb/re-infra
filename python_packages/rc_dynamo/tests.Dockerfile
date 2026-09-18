@@ -5,9 +5,11 @@
 # rc_dynamo exactly as it ships - the same interpreter, the same installed
 # package - instead of a separate editable copy.
 #
-# Driven by compose-tests.yaml, which supplies BASE_IMAGE and LocalStack.
+# Driven by compose-tests.yaml, which supplies BASE_IMAGE and LocalStack. There is
+# deliberately no fallback tag: the base image is always named in full, so the suite
+# can only ever run against an image someone asked for.
 
-ARG BASE_IMAGE=rc-dynamo:local
+ARG BASE_IMAGE
 
 FROM ghcr.io/astral-sh/uv:0.12.15 AS uv
 

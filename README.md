@@ -49,7 +49,7 @@ A push is the only trigger, and exactly one entry point runs: [`main.yml`](.gith
 ### Every branch except main — `non-main.yml`
 
 1. **Validate** ([`validate.yml`](.github/workflows/validate.yml)) installs the root project, runs Ruff, mypy, and pytest, runs `cfn-lint` on `infra/*.yaml`, and runs `rc-infra validate` on `envs.yaml`.
-2. **Build** ([`build.yml`](.github/workflows/build.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-tests.yaml`](python_packages/rc_dynamo/compose-tests.yaml), smoke-tests it, and pushes it to `rc-dynamo:<branch>`. It does not move `latest` and does not touch the SSM digest.
+2. **Build** ([`build.yml`](.github/workflows/build.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-tests.yaml`](python_packages/rc_dynamo/compose-tests.yaml), smoke-tests it, and pushes it to `rc-dynamo:<branch>`. It does not touch the SSM digest.
 
 A branch run reaches AWS only to push its own image tag; it never deploys infrastructure, and a branch deletion is skipped rather than rebuilt. To see what a change would do to live infrastructure, run a local dry run (section 3).
 
@@ -61,7 +61,7 @@ A branch run reaches AWS only to push its own image tag; it never deploys infras
    - It repeats the inexpensive template and config validation, then runs `rc-infra apply --yes`, which prints the plan, refuses it if anything is `BLOCKED`, and otherwise creates, imports, updates, or removes infrastructure until AWS matches `envs.yaml`.
 3. **Build** starts only after the environment deployment finishes successfully.
    - The same single job runs.
-   - Because the branch is `main`, it pushes both `rc-dynamo:main` and `rc-dynamo:latest`, then writes the new digest to `/rc/dynamo/image-uri`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
+   - Because the branch is `main`, it pushes `rc-dynamo:main`, then writes the new digest to `/rc/dynamo/image-uri`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
 
 The build workflow builds the image once and loads it locally; the tests, the smoke test and the push all run against that same loaded image, so an untested rebuild can never reach ECR.
 
@@ -73,7 +73,7 @@ The build workflow builds the image once and loads it locally; the tests, the sm
 | `non-main.yml` | push to any other branch | Entry point; validation and image build/test only | None. |
 | `validate.yml` | `workflow_call` | Lint, type-check, test, `cfn-lint`, `rc-infra validate` | None. |
 | `deploy-envs.yml` | `workflow_call` | Reconciles `rc-platform` and `rc-env-*`; tears down environments removed from `envs.yaml` | Main only, using the GitHub role and the CloudFormation execution role. |
-| `build.yml` | `workflow_call` | Builds, tests and publishes the Lambda base image in one job | Every branch pushes its own tag using the GitHub role; `main` also moves `latest` and writes the SSM digest. |
+| `build.yml` | `workflow_call` | Builds, tests and publishes the Lambda base image in one job | Every branch pushes its own tag using the GitHub role; `main` also writes the SSM digest. |
 
 A called workflow must never declare the same concurrency group as its caller: GitHub reports that as a deadlock and cancels the run. The entry points own `re-infra-<ref>`, `deploy-envs.yml` serializes on `re-infra-deploy`, and `validate.yml` declares none.
 
@@ -230,16 +230,16 @@ The image contains:
 - the `rc_dynamo` package, including the generic DynamoDB schema framework;
 - the `rc-dynamo-sync` and `rc-dynamo-report` console commands.
 
-It intentionally contains no Lambda handler/CMD, pytest, uv, source tests, or service-specific libraries - the test tooling is locked in a separate project under `tests/` and only ever enters the throwaway test image. Application Dockerfiles must inherit from the immutable digest published in `/rc/dynamo/image-uri`, not directly from the mutable `latest` tag.
+It intentionally contains no Lambda handler/CMD, pytest, uv, source tests, or service-specific libraries - the test tooling is locked in a separate project under `tests/` and only ever enters the throwaway test image. Application Dockerfiles must inherit from the immutable digest published in `/rc/dynamo/image-uri`, not from a branch tag: every tag moves.
 
 ### Change reusable code
 
 1. Edit `python_packages/rc_dynamo/src/rc_dynamo/`.
 2. Update unit or integration tests under `python_packages/rc_dynamo/tests/`.
 3. Run the checks - see [the package README](python_packages/rc_dynamo/README.md#2-local-development) for the dependency, venv and test-pipeline commands.
-4. Push the branch. It is built, tested and published as `rc-dynamo:<branch>`, so it can be pulled and tried before merging. Merging to `main` moves `main` and `latest` and republishes the digest.
+4. Push the branch. It is built, tested and published as `rc-dynamo:<branch>`, so it can be pulled and tried before merging. Merging to `main` moves `rc-dynamo:main` and republishes the digest.
 
-Every push republishes the tested image under a tag named after its branch, overwriting what that tag pointed at. A push to `main` additionally moves `latest` and writes the new immutable repository digest to `/rc/dynamo/image-uri`. There are no per-build tags; each image carries `org.opencontainers.image.revision` with the commit it was built from. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
+Every push republishes the tested image under a tag named after its branch, overwriting what that tag pointed at. There is no `latest`: a push to `main` moves `rc-dynamo:main` and writes the new immutable repository digest to `/rc/dynamo/image-uri`. There are no per-build tags; each image carries `org.opencontainers.image.revision` with the commit it was built from. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
 
 Because tags move, the image a tag previously pointed at becomes untagged, and `rc-platform`'s lifecycle rule expires untagged images after **30 days**. That window is also the rollback window: refresh any digest pinned in `retribalize-core` within it, or the pin stops resolving.
 
@@ -281,7 +281,7 @@ The package has its own venv, image and test pipeline. The whole gate - ruff, my
 
 ```bash
 cd python_packages/rc_dynamo
-docker build --platform linux/amd64 -t rc-dynamo:local .
+docker build --platform linux/amd64 -t rc-local/rc-dynamo:dev .
 docker compose -f compose-tests.yaml run --rm --build tests
 docker compose -f compose-tests.yaml down -v
 ```
@@ -299,7 +299,7 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
 | Assume the GitHub OIDC role | No; its trust policy accepts only GitHub Actions tokens from this repository | Yes |
 | Apply environment infrastructure | Technically possible with separately authorized local credentials, but not the normal path | Main only |
 | Publish the tested image under its branch tag | Not reproduced by the documented local commands | Every push |
-| Move `latest` and publish the digest to SSM | Not reproduced by the documented local commands | Main only |
+| Publish the digest to SSM | Not reproduced by the documented local commands | Main only |
 
 ## 7. Integration contract with `retribalize-core`
 

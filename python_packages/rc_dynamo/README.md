@@ -206,12 +206,17 @@ Unit tests need no AWS and no Docker.
 
 ### Build the image
 
-```bash
-docker build --platform linux/amd64 -t rc-dynamo:local .
+The image is named the same way everywhere - `<registry>/rc-dynamo:<tag>`. On a
+laptop the registry and tag are whatever you like; `rc-local` and `dev` are what
+[`compose-tests.yaml`](compose-tests.yaml) defaults to, so use them and the test
+pipeline below needs no extra variables.
 
-docker run --rm --platform linux/amd64 --entrypoint python rc-dynamo:local \
+```bash
+docker build --platform linux/amd64 -t rc-local/rc-dynamo:dev .
+
+docker run --rm --platform linux/amd64 --entrypoint python rc-local/rc-dynamo:dev \
   -c "import sys, rc_dynamo, rc_dynamo.cli; assert sys.version_info[:2] == (3, 11)"
-docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-sync rc-dynamo:local --help
+docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-sync rc-local/rc-dynamo:dev --help
 ```
 
 ### Run the full test pipeline
@@ -223,13 +228,17 @@ the suite onto the image built above, so the suite exercises the package as it
 ships.
 
 ```bash
-docker build --platform linux/amd64 -t rc-dynamo:local .      # required first
+docker build --platform linux/amd64 -t rc-local/rc-dynamo:dev .      # required first
 docker compose -f compose-tests.yaml run --rm --build tests
 docker compose -f compose-tests.yaml down -v
 ```
 
 The steps themselves live in [`tests/run-checks.sh`](tests/run-checks.sh); add
 checks there and both CI and every laptop pick them up.
+
+If the core image is under a different name, export `REGISTRY` and `IMAGE_TAG` and
+compose will build `FROM` that one instead - which is exactly how CI points the test
+image at the image it just built.
 
 Two things to know:
 
@@ -270,7 +279,7 @@ compose-tests.yaml       LocalStack + the test image = the full gate
 
 ### What CI does that you cannot
 
-Pushing the image to ECR under a branch tag, moving `latest`, and publishing the
-digest to SSM `/rc/dynamo/image-uri` all happen only in
+Pushing the image to ECR under a branch tag and publishing the
+digest to SSM `/rc/dynamo/image-uri` both happen only in
 [`.github/workflows/build.yml`](../../.github/workflows/build.yml). Everything it
 checks, you can run locally with the commands above.

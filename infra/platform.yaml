@@ -15,8 +15,8 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       RepositoryName: rc-dynamo
-      # Every tag moves: one tag per branch, rewritten on each push to that branch,
-      # plus "latest" tracking main. Immutable identity comes from the digest.
+      # Every tag moves: one tag per branch, rewritten on each push to that branch.
+      # Immutable identity comes from the digest.
       ImageTagMutability: MUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true

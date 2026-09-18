@@ -4,8 +4,8 @@ name: Non-main
 #   1. validate.yml           lint, test, validate the source and configs (no AWS access)
 #   2. build.yml              build, test and publish the Lambda base image as "<branch>"
 #
-# A branch run reaches AWS only to push its own image tag. It never moves "latest",
-# never writes the SSM digest, and never deploys infrastructure: that is main.yml.
+# A branch run reaches AWS only to push its own image tag. It never writes the SSM
+# digest and never deploys infrastructure: that is main.yml.
 #
 # Notes for LLMs:
 # - Do not change the "on" directive unless explicitly instructed to. Together with

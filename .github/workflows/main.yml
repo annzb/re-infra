@@ -3,7 +3,7 @@ name: Main
 # The entry point for pushes to main. It only calls other workflows, in this order:
 #   1. validate.yml           lint, test, validate the source and configs (no AWS access)
 #   2. deploy-envs.yml        apply envs.yaml to AWS - infrastructure only, never an app
-#   3. build.yml              build, test and publish the Lambda base image as "main" + "latest"
+#   3. build.yml              build, test and publish the Lambda base image as "main"
 #
 # Notes for LLMs:
 # - Do not change the "on" directive unless explicitly instructed to.

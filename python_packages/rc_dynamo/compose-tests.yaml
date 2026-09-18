@@ -2,13 +2,14 @@
 # LocalStack-backed schema-sync integration suite. The steps themselves live in
 # tests/run-checks.sh, so CI and a laptop run exactly the same thing.
 #
-#   docker build --platform linux/amd64 -t rc-dynamo:local .
+#   docker build --platform linux/amd64 -t rc-local/rc-dynamo:dev .
 #   docker compose -f compose-tests.yaml run --rm --build tests
 #   docker compose -f compose-tests.yaml down -v
 #
-# The core image has to exist first: only the thin test layer is built here.
-# build.yml tags the image it just built as rc-dynamo:local so the default
-# applies; BASE_IMAGE overrides it if you keep the core image under another tag.
+# The core image has to exist first: only the thin test layer is built here. Its name
+# comes from REGISTRY and IMAGE_TAG, whose defaults match the build command above. In
+# CI, build.yml exports both, so the same expression resolves to the image it just
+# built - there is no separate tag for local and published images.
 #
 # Because the test image is layered on an image held only in the local daemon, the
 # build has to run on a builder that can see it - that is, one using the "docker"
@@ -40,7 +41,7 @@ services:
       platforms:
         - linux/amd64
       args:
-        BASE_IMAGE: ${BASE_IMAGE:-rc-dynamo:local}
+        BASE_IMAGE: ${REGISTRY:-rc-local}/rc-dynamo:${IMAGE_TAG:-dev}
     depends_on:
       localstack:
         condition: service_healthy

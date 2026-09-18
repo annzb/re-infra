@@ -5,7 +5,7 @@
 # rc_dynamo exactly as it ships - the same interpreter, the same installed
 # package - instead of a separate editable copy.
 #
-# Driven by compose-tests.yaml, which supplies BASE_IMAGE and LocalStack. There is
+# Driven by compose-build-test.yaml, which supplies BASE_IMAGE and LocalStack. There is
 # deliberately no fallback tag: the base image is always named in full, so the suite
 # can only ever run against an image someone asked for.
 

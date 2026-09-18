@@ -49,7 +49,7 @@ A push is the only trigger, and exactly one entry point runs: [`main.yml`](.gith
 ### Every branch except main — `non-main.yml`
 
 1. **Validate** ([`validate.yml`](.github/workflows/validate.yml)) installs the root project, runs Ruff, mypy, and pytest, runs `cfn-lint` on `infra/*.yaml`, and runs `rc-infra validate` on `envs.yaml`.
-2. **Build** ([`build.yml`](.github/workflows/build.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-tests.yaml`](python_packages/rc_dynamo/compose-tests.yaml), smoke-tests it, and pushes it to `rc-dynamo:<branch>`. It does not touch the SSM digest.
+2. **Build** ([`build.yml`](.github/workflows/build.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-build-test.yaml`](python_packages/rc_dynamo/compose-build-test.yaml), and pushes it to `rc-dynamo:<branch>`. It does not touch the SSM digest.
 
 A branch run reaches AWS only to push its own image tag; it never deploys infrastructure, and a branch deletion is skipped rather than rebuilt. To see what a change would do to live infrastructure, run a local dry run (section 3).
 
@@ -281,9 +281,9 @@ The package has its own venv, image and test pipeline. The whole gate - ruff, my
 
 ```bash
 cd python_packages/rc_dynamo
-docker build --platform linux/amd64 -t rc-local/rc-dynamo:dev .
-docker compose -f compose-tests.yaml run --rm --build tests
-docker compose -f compose-tests.yaml down -v
+BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
+docker compose -f compose-build-test.yaml run --rm --build tests
+docker compose -f compose-build-test.yaml down -v
 ```
 
 See [the package README](python_packages/rc_dynamo/README.md#2-local-development) for venv setup, dependency changes, and running individual checks without Docker.

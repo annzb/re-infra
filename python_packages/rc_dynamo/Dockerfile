@@ -52,11 +52,9 @@ WORKDIR ${LAMBDA_TASK_ROOT}
 
 # Last, so per-build values never invalidate the layers above.
 ARG SOURCE_REPOSITORY=""
-ARG REVISION=""
 ARG CREATED=""
 LABEL org.opencontainers.image.title="rc-dynamo" \
       org.opencontainers.image.description="Retribalize Lambda parent image with the rc_dynamo DynamoDB framework" \
       org.opencontainers.image.source="${SOURCE_REPOSITORY}" \
-      org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.created="${CREATED}" \
       ai.retribalize.python.version="3.11"

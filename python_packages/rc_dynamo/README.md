@@ -206,13 +206,15 @@ Unit tests need no AWS and no Docker.
 
 ### Build the image
 
-The image is named the same way everywhere - `<registry>/rc-dynamo:<tag>`. On a
-laptop the registry and tag are whatever you like; `rc-local` and `dev` are what
-[`compose-tests.yaml`](compose-tests.yaml) defaults to, so use them and the test
-pipeline below needs no extra variables.
+[`compose-build-test.yaml`](compose-build-test.yaml) builds it, under the one name
+the image has everywhere - `<registry>/rc-dynamo:<tag>`. On a laptop the registry and
+tag are whatever you like; `rc-local` and `dev` are the defaults, so use them and
+nothing else needs setting. `BUILD_CACHE_TO=type=inline` is needed because the default
+buildx driver cannot export the GitHub Actions cache the file asks for on CI; the file
+header explains it.
 
 ```bash
-docker build --platform linux/amd64 -t rc-local/rc-dynamo:dev .
+BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
 
 docker run --rm --platform linux/amd64 --entrypoint python rc-local/rc-dynamo:dev \
   -c "import sys, rc_dynamo, rc_dynamo.cli; assert sys.version_info[:2] == (3, 11)"
@@ -221,22 +223,22 @@ docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-sync rc-local/rc-d
 
 ### Run the full test pipeline
 
-[`compose-tests.yaml`](compose-tests.yaml) is the whole gate — lockfile checks,
-ruff, mypy, unit tests, and the LocalStack integration suite — and it is exactly
-what CI runs. [`tests.Dockerfile`](tests.Dockerfile) layers the test tooling and
-the suite onto the image built above, so the suite exercises the package as it
+[`compose-build-test.yaml`](compose-build-test.yaml) is the whole gate — lockfile
+checks, ruff, mypy, unit tests, and the LocalStack integration suite — and it is
+exactly what CI runs. [`tests.Dockerfile`](tests.Dockerfile) layers the test tooling
+and the suite onto the image built above, so the suite exercises the package as it
 ships.
 
 ```bash
-docker build --platform linux/amd64 -t rc-local/rc-dynamo:dev .      # required first
-docker compose -f compose-tests.yaml run --rm --build tests
-docker compose -f compose-tests.yaml down -v
+BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
+docker compose -f compose-build-test.yaml run --rm --build tests
+docker compose -f compose-build-test.yaml down -v
 ```
 
 The steps themselves live in [`tests/run-checks.sh`](tests/run-checks.sh); add
 checks there and both CI and every laptop pick them up.
 
-If the core image is under a different name, export `REGISTRY` and `IMAGE_TAG` and
+If the core image is under a different name, export `ECR_REGISTRY` and `IMAGE_TAG` and
 compose will build `FROM` that one instead - which is exactly how CI points the test
 image at the image it just built.
 
@@ -254,12 +256,12 @@ To iterate on the integration tests without rebuilding the image, start
 LocalStack alone and run pytest on the host:
 
 ```bash
-docker compose -f compose-tests.yaml up -d --wait localstack
+docker compose -f compose-build-test.yaml up -d --wait localstack
 AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test \
 AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 \
 DYNAMO_SCHEMA_TEST_PREFIX=rc-local-schema-sync-test \
   uv run --project tests pytest tests/integration
-docker compose -f compose-tests.yaml down -v
+docker compose -f compose-build-test.yaml down -v
 ```
 
 ### Layout
@@ -274,7 +276,7 @@ tests/                   its own pyproject.toml + uv.lock (pytest, mypy, ruff)
   integration/           LocalStack-backed schema-sync suite
 Dockerfile               the published image
 tests.Dockerfile         test image, FROM the published image
-compose-tests.yaml       LocalStack + the test image = the full gate
+compose-build-test.yaml  builds both images; LocalStack + the test image = the gate
 ```
 
 ### What CI does that you cannot

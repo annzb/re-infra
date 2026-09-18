@@ -1,0 +1,75 @@
+# Builds the rc-dynamo images and runs the whole gate against them: ruff, mypy, unit
+# tests, and the LocalStack-backed schema-sync integration suite. The steps themselves
+# live in tests/run-checks.sh, so CI and a laptop run exactly the same thing.
+#
+#   BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
+#   docker compose -f compose-build-test.yaml run --rm --build tests
+#   docker compose -f compose-build-test.yaml down -v
+#
+# Two commands, not one, because the two builds need different buildx drivers:
+#
+# - "base" carries a gha cache, which only a docker-container driver can export. CI
+#   points BUILDX_BUILDER at the builder setup-buildx-action created. The "docker"
+#   driver a laptop uses cannot export any cache but inline, hence BUILD_CACHE_TO above.
+#   BUILD_CACHE_FROM needs no override: importing a gha cache without an Actions token
+#   is a silent no-op, so the default is harmless off CI.
+# - "tests" layers onto the image "base" just built, which lives only in the local
+#   daemon. Only the "docker" driver can see it, so this build runs on the default
+#   builder and carries no cache. If `docker buildx ls` shows a docker-container builder
+#   as current, point compose at a docker-driver one:
+#     BUILDX_BUILDER=desktop-linux docker compose -f compose-build-test.yaml run --rm --build tests
+name: rc-dynamo-build-test
+
+# One name for the image everywhere - there is no separate local alias. CI exports
+# ECR_REGISTRY and IMAGE_TAG from build.yml; the defaults are what a laptop gets.
+x-image-ref: &image-ref ${ECR_REGISTRY:-273268178059.dkr.ecr.us-east-1.amazonaws.com}/rc-dynamo:${IMAGE_TAG:-latest}
+
+services:
+  # The published Lambda parent image. Build-only: "profiles" keeps "up" and "run" from
+  # ever starting it, since it is a runtime-interface image with no command of its own.
+  # Naming it explicitly still builds it - no --profile needed.
+  base:
+    profiles: ["build"]
+    image: *image-ref
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+      cache_from: ["${BUILD_CACHE_FROM:-type=gha,scope=rc-dynamo}"]
+      cache_to: ["${BUILD_CACHE_TO:-type=gha,mode=max,scope=rc-dynamo}"]
+
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: s3,dynamodb
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  tests:
+    # linux/amd64 throughout, matching the core image and Lambda. On an arm64 host
+    # this runs emulated; without it the build cannot resolve the local core image.
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: tests.Dockerfile
+      platforms:
+        - linux/amd64
+      args:
+        BASE_IMAGE: *image-ref
+    depends_on:
+      localstack:
+        condition: service_healthy
+    environment:
+      # The integration suite refuses to run against anything but LocalStack.
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      DYNAMO_SCHEMA_TEST_PREFIX: ${DYNAMO_SCHEMA_TEST_PREFIX:-rc-local-schema-sync-test}

@@ -1,6 +1,6 @@
 name: Build
 
-# Build the Lambda parent image, test it, and publish it to ECR.
+# Build the base app image, test it, and publish to ECR.
 # Called by entrypoint workflows main.yml and non-main.yml.
 #
 # Notes for LLMs:
@@ -42,86 +42,48 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
         id: ecr
 
-      # Set up a container-driver builder for the image build (it is what supports the
-      # gha cache), but leave it unselected: the compose build below layers onto an
-      # image that exists only in the local daemon, which only the default "docker"
-      # driver can see.
+      # set up image builder
       - uses: docker/setup-buildx-action@v4
         id: buildx
         with:
+          # Left unselected on purpose: the test image builds FROM an image that exists
+          # only in the local daemon, which a docker-container builder cannot read, so
+          # that build has to run on the default "docker" driver.
           use: false
 
-      # named image tag after current branch
-      - name: Resolve the image tag
+      # set up build cache
+      - uses: crazy-max/ghaction-github-runtime@v3
+
+      # name image name after current branch
+      - name: Resolve the image name
         env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           tag=$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-128)
           {
-            echo "REGISTRY=$ECR_REGISTRY"
+            echo "ECR_REGISTRY=$REGISTRY"
             echo "IMAGE_TAG=$tag"
-            echo "IMAGE=${ECR_REGISTRY}/rc-dynamo:${tag}"
+            echo "IMAGE=${REGISTRY}/rc-dynamo:${tag}"
           } >> "$GITHUB_ENV"
 
-      # Loaded, not pushed: the tests and the smoke test below run first, so an
-      # untested image can never reach ECR.
-      - uses: docker/build-push-action@v7
-        with:
-          # This input is repo-root-relative and ignores the job's working-directory.
-          context: python_packages/rc_dynamo
-          builder: ${{ steps.buildx.outputs.name }}
-          tags: ${{ env.IMAGE }}
-          build-args: REVISION=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          load: true
-
-      # ruff, mypy, unit tests and the LocalStack integration suite, against the image
-      # that was just built: compose resolves its base image from REGISTRY and IMAGE_TAG,
-      # so only the thin test layer is built here.
-      - name: Test
-        run: docker compose -f compose-tests.yaml run --rm --build tests
-
-      - name: Tear down the test stack
-        if: always()
-        run: docker compose -f compose-tests.yaml down -v
-
-      # The published image must hold the package and console scripts, and must not
-      # hold the test tooling.
-      - name: Smoke test the built image
+      # Build the base image, then the test image on top of it, then run the suite: ruff,
+      # mypy, unit tests and the LocalStack integration suite. Neither image is pushed
+      # yet, so an untested one can never reach ECR. BUILDX_BUILDER applies to the base
+      # build alone - the test build needs the default driver, see the builder step above.
+      - name: Build and test
         run: |
-          docker run --rm --entrypoint python "$IMAGE" -c \
-            "import sys, rc_dynamo, rc_dynamo.cli; assert sys.version_info[:2] == (3, 11)"
-          docker run --rm --entrypoint rc-dynamo-sync "$IMAGE" --help
-          docker run --rm --entrypoint rc-dynamo-report "$IMAGE" --help
-          if docker run --rm --entrypoint python "$IMAGE" -c "import pytest" 2>/dev/null; then
-            echo "::error::pytest is installed in the published image"
-            exit 1
-          fi
+          BUILDX_BUILDER=${{ steps.buildx.outputs.name }} \
+            docker compose -f compose-build-test.yaml build base
+          docker compose -f compose-build-test.yaml run --rm --build tests
 
       - name: Push
-        id: push
-        run: |
-          docker push "$IMAGE"
-          digest=$(aws ecr describe-images --repository-name rc-dynamo \
-            --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+        run: docker push "$IMAGE"
 
       # The digest, not the tag, is what retribalize-core pins - and only main moves it.
       - name: Publish the digest
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
+        if: github.ref_name == 'main'
         run: |
-          {
-            echo "## Lambda base image published"
-            echo ""
-            echo "- Tag: \`${IMAGE}\`"
-            echo "- Digest: \`${DIGEST}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$GITHUB_REF_NAME" != "main" ]; then
-            echo "Branch build: /rc/dynamo/image-uri is left unchanged."
-            exit 0
-          fi
+          digest=$(aws ecr describe-images --repository-name rc-dynamo \
+            --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)
           aws ssm put-parameter --name /rc/dynamo/image-uri --type String --overwrite \
-            --value "${REGISTRY}/rc-dynamo@${DIGEST}"
-          echo "- Pin in retribalize-core: \`${REGISTRY}/rc-dynamo@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+            --value "${ECR_REGISTRY}/rc-dynamo@${digest}"

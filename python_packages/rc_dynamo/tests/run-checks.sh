@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# The full quality gate, in one place. compose-tests.yaml runs this inside the test
+# The full quality gate, in one place. compose-build-test.yaml runs this inside the test
 # container, and CI runs compose - so what CI checks is what you can run locally:
 #
-#   docker build -t rc-local/rc-dynamo:dev .
-#   docker compose -f compose-tests.yaml run --rm --build tests
+#   BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
+#   docker compose -f compose-build-test.yaml run --rm --build tests
 #
 # Run it directly from the package root with LocalStack already up:
 #   uv run --project tests bash tests/run-checks.sh

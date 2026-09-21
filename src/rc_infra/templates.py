@@ -45,13 +45,7 @@ def environment_tags(env: Environment) -> dict[str, str]:
 
 
 def environment_parameters(env: Environment) -> dict[str, str]:
-    return {
-        "EnvironmentName": env.name,
-        "IdentityProfile": env.identity_profile,
-        "UserPoolId": env.identity.user_pool_id,
-        "UserPoolClientId": env.identity.client_id,
-        "CognitoDomain": env.identity.domain,
-    }
+    return {"EnvironmentName": env.name}
 
 
 def import_template(template: dict[str, Any], logical_ids: Iterable[str]) -> dict[str, Any]:

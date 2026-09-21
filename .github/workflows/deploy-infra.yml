@@ -24,8 +24,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    env:
-      AWS_ROLE_CFN: ${{ vars.AWS_ROLE_CFN }}
     defaults:
       run:
         shell: bash

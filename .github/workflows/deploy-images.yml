@@ -58,7 +58,7 @@ jobs:
           {
             echo "ECR_REGISTRY=$REGISTRY"
             echo "IMAGE_TAG=$tag"
-            echo "IMAGE=${REGISTRY}/rc-dynamo:${tag}"
+            echo "IMAGE=${REGISTRY}/rc-lambda-base:${tag}"
           } >> "$GITHUB_ENV"
 
       - name: Build and test

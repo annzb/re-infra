@@ -1,16 +1,40 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Retribalize shared platform resources (stack rc-platform): the repository for
-  the Lambda base image built from python_packages/rc_dynamo. Deployed by
-  `rc-infra apply`.
+  Retribalize shared platform resources (stack rc-platform): the container image
+  repositories, the Cognito identity pools, and the shared Lambda execution role.
+  Everything here is shared by every environment. Deployed by `rc-infra apply`.
+
+# Conventions (rc-infra parses this file with yaml.safe_load):
+#   - Long-form intrinsics only (Fn::GetAtt with a list, Ref), never !GetAtt.
+#   - Everything here is Retain. Deleting the stack must never delete an image a
+#     deployed Lambda is running, nor a pool holding real user accounts.
+#   - The YAML anchor below is resolved by yaml.safe_load; rc-infra re-serializes
+#     the result to JSON (templates.py), so CloudFormation never sees an alias.
+#     That is what the two suppressed cfn-lint warnings are about -- W1100/W1101
+#     assume the raw file is handed to `aws cloudformation deploy`, which it is not.
+#
+# THIS STACK IS CREATED BY IMPORT, NOT BY CREATE. Fifteen of the sixteen resources
+# below already existed before this repository did; only rc-lambda-base is new. A
+# CREATE would try to remake them and fail -- hosted UI domain prefixes are globally
+# unique, and the role and repository names are taken -- and because everything here
+# is Retain, the rollback can leave duplicate Cognito pools behind. See README
+# section 8 for the one-time adoption procedure.
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W1100  # YAML merge keys: resolved at parse time, never sent to CloudFormation
+        - W1101  # YAML aliases: same
 
 Resources:
-  DynamoImageRepository:
+  # The Python 3.11 Lambda parent image built from python_packages/rc_dynamo.
+  LambdaBaseImageRepository:
     Type: AWS::ECR::Repository
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      RepositoryName: rc-dynamo
+      RepositoryName: rc-lambda-base
       # Every tag moves: one tag per branch, rewritten on each push to that branch.
       # Immutable identity comes from the digest.
       ImageTagMutability: MUTABLE
@@ -18,6 +42,9 @@ Resources:
         ScanOnPush: true
       EncryptionConfiguration:
         EncryptionType: AES256
+      # Safe here precisely because tags move: an untagged image in this
+      # repository is one a later branch build superseded. The two service
+      # repositories below deliberately have no equivalent rule.
       LifecyclePolicy:
         LifecyclePolicyText: |
           {
@@ -46,7 +73,490 @@ Resources:
               - ecr:BatchGetImage
               - ecr:GetDownloadUrlForLayer
 
+  # The API image. retribalize-core builds it and deploys it BY DIGEST through
+  # its ApiImageUri parameter, so a live Lambda's image is normally untagged --
+  # an untagged-expiry rule here would delete an image that is running. The only
+  # tag it carries is the mutable "buildcache" layer cache, which nothing deploys.
+  # There is no lifecycle policy on purpose: an old image is what a rollback needs.
+  ApiImageRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: rc-api
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LambdaECRImageRetrievalPolicy
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+
+  # The one image every matching Lambda shares, deployed by digest through
+  # retribalize-core's MatchingImageUri parameter. No lifecycle policy, for the
+  # same reason as rc-api.
+  MatchingImageRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: rc-matching
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LambdaECRImageRetrievalPolicy
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+
+  # ── Identity ────────────────────────────────────────────────────────
+  # Four Cognito pools, one per identity profile in envs.yaml. They are shared:
+  # every preview environment (preview1..8, preview67, preview89) signs in
+  # against the single "preview" pool, which is why these live in rc-platform
+  # and not in the per-environment stack.
+  #
+  # ADOPTED, NEVER CREATED. These pools hold real accounts (prod had 7,039 at
+  # the time of writing). The properties below were generated from the live
+  # pools with `aws cloudformation create-generated-template`, so they are what
+  # CloudFormation itself reads back from them -- do not hand-edit them to
+  # "tidy" anything. Changing Schema, UsernameAttributes or AliasAttributes
+  # forces replacement, and replacing a pool destroys every account in it.
+  #
+  # The four pools differ only in UserPoolName and LambdaConfig; everything else
+  # is shared through the anchor on ProdUserPool below.
+  #
+  # The OIDC identity providers (Discord, Google, LinkedIn, SignInWithApple) are
+  # deliberately NOT declared: AWS::Cognito::UserPoolIdentityProvider carries the
+  # provider client secret in ProviderDetails, and nothing secret goes in a
+  # template. They stay managed outside this repository. See infra/identity.md.
+  ProdUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties: &pool-common
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+        - Priority: 1
+          Name: verified_email
+      AdminCreateUserConfig:
+        UnusedAccountValidityDays: 7
+        AllowAdminCreateUserOnly: false
+      AliasAttributes: []
+      AutoVerifiedAttributes:
+      - email
+      DeletionProtection: INACTIVE
+      EmailConfiguration:
+        SourceArn: arn:aws:ses:us-east-1:273268178059:identity/no-reply@retribalize.ai
+        EmailSendingAccount: DEVELOPER
+        From: no-reply@retribalize.ai
+      IssuerConfiguration:
+        Type: ORIGINAL
+      KeyConfiguration:
+        KeyType: AWS_OWNED_KEY
+      MfaConfiguration: 'OFF'
+      Policies:
+        PasswordPolicy:
+          TemporaryPasswordValidityDays: 7
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireLowercase: true
+          MinimumLength: 8
+          RequireSymbols: true
+        SignInPolicy:
+          AllowedFirstAuthFactors:
+          - PASSWORD
+      # Only the custom attributes are declared. Cognito maintains the ~21
+      # standard OIDC attributes (email, name, sub, phone_number_verified, ...)
+      # implicitly, and none of them is marked Required on these pools except
+      # `sub`, which is always implicit. Listing them here would add nothing and
+      # would break cfn-lint's 20-character limit on an attribute name.
+      #
+      # Schema is replacement-forcing and cannot be changed in place. Adding an
+      # attribute means creating it on the live pools first, then recording it
+      # here -- never the other way round.
+      Schema:
+      - Name: custom:user_id
+        AttributeDataType: String
+        DeveloperOnlyAttribute: false
+        Mutable: true
+        Required: false
+        StringAttributeConstraints:
+          MinLength: '0'
+          MaxLength: '256'
+      - Name: custom:supabase_id
+        AttributeDataType: String
+        DeveloperOnlyAttribute: false
+        Mutable: true
+        Required: false
+        StringAttributeConstraints:
+          MinLength: '0'
+          MaxLength: '256'
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate: []
+      UserPoolTags: {}
+      UserPoolTier: ESSENTIALS
+      UsernameAttributes:
+      - email
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+      UserPoolName: rc-prod-user-pool-v2
+      LambdaConfig:
+        UserMigration: arn:aws:lambda:us-east-1:273268178059:function:rc-prod-user-migration
+        PostConfirmation: arn:aws:lambda:us-east-1:273268178059:function:rc-prod-post-signup:live
+
+  StagingUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *pool-common
+      UserPoolName: rc-staging-user-pool-v2
+      LambdaConfig:
+        UserMigration: arn:aws:lambda:us-east-1:273268178059:function:rc-staging-user-migration
+        PostConfirmation: arn:aws:lambda:us-east-1:273268178059:function:rc-staging-post-signup:live
+
+  DevUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *pool-common
+      UserPoolName: rc-dev-user-pool-v2
+      LambdaConfig:
+        UserMigration: arn:aws:lambda:us-east-1:273268178059:function:rc-dev-user-migration
+        PostConfirmation: arn:aws:lambda:us-east-1:273268178059:function:rc-dev-post-signup:live
+
+  PreviewUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *pool-common
+      UserPoolName: rc-preview-user-pool-v2
+      LambdaConfig:
+        UserMigration: arn:aws:lambda:us-east-1:273268178059:function:rc-preview1-user-migration
+        PostConfirmation: arn:aws:lambda:us-east-1:273268178059:function:rc-preview1-post-signup:live
+
+  # App clients. No client secret is generated for any of them (these are public
+  # mobile/web clients), so nothing here is sensitive.
+
+  ProdUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClientName: rc-prod-app-client
+      UserPoolId:
+        Ref: ProdUserPool
+      AllowedOAuthFlows:
+      - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+      - email
+      - openid
+      - profile
+      AuthSessionValidity: 3
+      CallbackURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-core.vercel.app/login
+      - https://retribalize-prod.vercel.app/login
+      - https://retribalize.ai/login
+      - https://www.retribalize.ai/login
+      - retribalize://login
+      EnablePropagateAdditionalUserContextData: false
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+      - ALLOW_REFRESH_TOKEN_AUTH
+      - ALLOW_USER_PASSWORD_AUTH
+      - ALLOW_USER_SRP_AUTH
+      GenerateSecret: false
+      LogoutURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-core.vercel.app/login
+      - https://retribalize-prod.vercel.app/login
+      - https://retribalize.ai/login
+      - https://www.retribalize.ai/login
+      - retribalize://login
+      ReadAttributes: []
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders:
+      - COGNITO
+      - Discord
+      - Google
+      - LinkedIn
+      - SignInWithApple
+      TokenValidityUnits: {}
+      WriteAttributes: []
+
+  StagingUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClientName: rc-staging-app-client
+      UserPoolId:
+        Ref: StagingUserPool
+      AllowedOAuthFlows:
+      - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+      - email
+      - openid
+      - profile
+      AuthSessionValidity: 3
+      CallbackURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-staging.vercel.app/login
+      - retribalize://login
+      EnablePropagateAdditionalUserContextData: false
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+      - ALLOW_REFRESH_TOKEN_AUTH
+      - ALLOW_USER_PASSWORD_AUTH
+      - ALLOW_USER_SRP_AUTH
+      GenerateSecret: false
+      LogoutURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-staging.vercel.app/login
+      - retribalize://login
+      ReadAttributes: []
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders:
+      - COGNITO
+      - Discord
+      - Google
+      - LinkedIn
+      - SignInWithApple
+      TokenValidityUnits: {}
+      WriteAttributes: []
+
+  DevUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClientName: rc-dev-app-client
+      UserPoolId:
+        Ref: DevUserPool
+      AllowedOAuthFlows:
+      - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+      - email
+      - openid
+      - profile
+      AuthSessionValidity: 3
+      CallbackURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-dev.vercel.app/login
+      - retribalize://login
+      EnablePropagateAdditionalUserContextData: false
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+      - ALLOW_REFRESH_TOKEN_AUTH
+      - ALLOW_USER_PASSWORD_AUTH
+      - ALLOW_USER_SRP_AUTH
+      GenerateSecret: false
+      LogoutURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-dev.vercel.app/login
+      - retribalize://login
+      ReadAttributes: []
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders:
+      - COGNITO
+      - Discord
+      - Google
+      - LinkedIn
+      - SignInWithApple
+      TokenValidityUnits: {}
+      WriteAttributes: []
+
+  PreviewUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClientName: rc-preview-app-client
+      UserPoolId:
+        Ref: PreviewUserPool
+      AccessTokenValidity: 60
+      AllowedOAuthFlows:
+      - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+      - email
+      - openid
+      - profile
+      AuthSessionValidity: 3
+      CallbackURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-preview1.vercel.app/login
+      - https://retribalize-preview2.vercel.app/login
+      - https://retribalize-preview3.vercel.app/login
+      - https://retribalize-preview4.vercel.app/login
+      - https://retribalize-preview5.vercel.app/login
+      - https://retribalize-preview6.vercel.app/login
+      - https://retribalize-preview67.vercel.app/login
+      - https://retribalize-preview7.vercel.app/login
+      - https://retribalize-preview8.vercel.app/login
+      - retribalize://login
+      EnablePropagateAdditionalUserContextData: false
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+      - ALLOW_CUSTOM_AUTH
+      - ALLOW_REFRESH_TOKEN_AUTH
+      - ALLOW_USER_PASSWORD_AUTH
+      GenerateSecret: false
+      IdTokenValidity: 60
+      LogoutURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-preview1.vercel.app/login
+      - https://retribalize-preview2.vercel.app/login
+      - https://retribalize-preview3.vercel.app/login
+      - https://retribalize-preview4.vercel.app/login
+      - https://retribalize-preview5.vercel.app/login
+      - https://retribalize-preview6.vercel.app/login
+      - https://retribalize-preview67.vercel.app/login
+      - https://retribalize-preview7.vercel.app/login
+      - https://retribalize-preview8.vercel.app/login
+      - retribalize://login
+      ReadAttributes: []
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders:
+      - COGNITO
+      - Discord
+      - Google
+      - LinkedIn
+      - SignInWithApple
+      TokenValidityUnits:
+        IdToken: minutes
+        AccessToken: minutes
+        RefreshToken: days
+      WriteAttributes: []
+
+  # Hosted UI domains. The prefix is the value retribalize-core receives as its
+  # CognitoOAuthDomain parameter, suffixed with .auth.<region>.amazoncognito.com.
+
+  ProdUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Domain: rc-prod-v2
+      UserPoolId:
+        Ref: ProdUserPool
+
+  StagingUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Domain: rc-staging-v2
+      UserPoolId:
+        Ref: StagingUserPool
+
+  DevUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Domain: rc-dev-v2
+      UserPoolId:
+        Ref: DevUserPool
+
+  PreviewUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Domain: rc-preview-v2
+      UserPoolId:
+        Ref: PreviewUserPool
+
+  # ── Shared Lambda execution role ────────────────────────────────────
+  # Every Lambda in retribalize-core's application stack runs as this role; its
+  # template names it by literal ARN 184 times. It is app-independent and was
+  # previously owned by nobody, so it is adopted here. Also generated from the
+  # live role. Declaring a named IAM role means rc-platform now needs
+  # CAPABILITY_NAMED_IAM.
+  LambdaPowerRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: LambdaPower
+      Description: Allows Lambda functions to call AWS services on your behalf.
+      Path: /
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/PowerUserAccess
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+
 Outputs:
-  DynamoImageRepositoryUri:
+  LambdaBaseImageRepositoryUri:
     Value:
-      Fn::GetAtt: [DynamoImageRepository, RepositoryUri]
+      Fn::GetAtt: [LambdaBaseImageRepository, RepositoryUri]
+  ApiImageRepositoryUri:
+    Value:
+      Fn::GetAtt: [ApiImageRepository, RepositoryUri]
+  MatchingImageRepositoryUri:
+    Value:
+      Fn::GetAtt: [MatchingImageRepository, RepositoryUri]
+  ProdUserPoolId:
+    Value:
+      Ref: ProdUserPool
+  ProdUserPoolClientId:
+    Value:
+      Ref: ProdUserPoolClient
+  StagingUserPoolId:
+    Value:
+      Ref: StagingUserPool
+  StagingUserPoolClientId:
+    Value:
+      Ref: StagingUserPoolClient
+  DevUserPoolId:
+    Value:
+      Ref: DevUserPool
+  DevUserPoolClientId:
+    Value:
+      Ref: DevUserPoolClient
+  PreviewUserPoolId:
+    Value:
+      Ref: PreviewUserPool
+  PreviewUserPoolClientId:
+    Value:
+      Ref: PreviewUserPoolClient
+  LambdaPowerRoleArn:
+    Value:
+      Fn::GetAtt: [LambdaPowerRole, Arn]

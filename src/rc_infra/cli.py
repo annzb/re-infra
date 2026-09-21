@@ -9,7 +9,6 @@ Exit codes: 0 success, 1 invalid config / blocked plan / failed apply, 2 usage e
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -18,8 +17,6 @@ from rc_infra import aws as aws_module
 from rc_infra.apply import ApplyRefused, apply_plan
 from rc_infra.env_config import DEFAULT_ENVS_PATH, EnvConfig, EnvConfigError, load_env_config
 from rc_infra.planner import build_plan, render_text
-
-CFN_ROLE_ENV = "AWS_ROLE_CFN"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -42,7 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(account_error, file=sys.stderr)
         return 1
 
-    aws = aws_module.connect(config.region, args.cfn_role_arn)
+    aws = aws_module.connect(config.region)
     plan = build_plan(config, aws)
 
     print(render_text(plan))
@@ -67,17 +64,10 @@ def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--config", type=Path, default=DEFAULT_ENVS_PATH)
 
-    aws_options = argparse.ArgumentParser(add_help=False)
-    aws_options.add_argument(
-        "--cfn-role-arn",
-        default=os.environ.get(CFN_ROLE_ENV) or None,
-        help=f"role CloudFormation assumes (default: ${CFN_ROLE_ENV})",
-    )
-
     parser = argparse.ArgumentParser(prog="rc-infra", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("validate", parents=[common], help="validate the config")
-    apply = commands.add_parser("apply", parents=[common, aws_options], help="apply the config to AWS")
+    apply = commands.add_parser("apply", parents=[common], help="apply the config to AWS")
     apply.add_argument("--yes", action="store_true", help="actually apply")
     return parser
 

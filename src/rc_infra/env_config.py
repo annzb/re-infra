@@ -107,10 +107,6 @@ class Environment:
         return table_prefix(self.name)
 
     @property
-    def ssm_prefix(self) -> str:
-        return f"/{RESOURCE_PREFIX}/env/{self.name}/"
-
-    @property
     def buckets(self) -> dict[str, str]:
         """Bucket purpose -> bucket name."""
         return {purpose: f"{RESOURCE_PREFIX}-{self.name}-{purpose}-{self.account_id}" for purpose in BUCKET_LOGICAL_IDS}
@@ -124,7 +120,6 @@ class Environment:
             "core_stack": self.core_stack,
             "app_stack": self.app_stack,
             "table_prefix": self.table_prefix,
-            "ssm_prefix": self.ssm_prefix,
             "buckets": self.buckets,
             "identity_profile": self.identity_profile,
             "identity": self.identity.model_dump(),

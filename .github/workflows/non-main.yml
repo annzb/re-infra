@@ -1,6 +1,6 @@
 name: Non-main
 
-# The entry point for pushes to every branch except main. Read-only stages only:
+# The entry point for pushes to every branch except main.
 #   1. validate.yml           lint, test, validate the source and configs (no AWS access)
 #   2. deploy-images.yml      build, test and publish the Lambda base image as "<branch>"
 #

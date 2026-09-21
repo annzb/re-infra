@@ -13,7 +13,7 @@ from tests.fakes import ACCOUNT_ID, FakeAws, env_stack_tags
 @pytest.fixture
 def connected(monkeypatch: pytest.MonkeyPatch, fake: FakeAws) -> FakeAws:
     monkeypatch.setattr(aws_module, "caller_account", lambda region: ACCOUNT_ID)
-    monkeypatch.setattr(aws_module, "connect", lambda region, role: fake.aws)
+    monkeypatch.setattr(aws_module, "connect", lambda region: fake.aws)
     return fake
 
 

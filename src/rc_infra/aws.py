@@ -78,7 +78,6 @@ class StackApi(Protocol):
         template_body: str,
         parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        role_arn: str | None,
     ) -> list[ResourceChange]:
         """Changes an UPDATE would make. Never executes anything."""
         ...
@@ -90,7 +89,6 @@ class StackApi(Protocol):
         template_body: str,
         parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        role_arn: str | None,
         resources_to_import: Sequence[Mapping[str, Any]] = (),
     ) -> list[ResourceChange]:
         """Create and execute a change set, waiting for completion. Returns what changed."""
@@ -98,7 +96,7 @@ class StackApi(Protocol):
 
     def set_termination_protection(self, name: str, enabled: bool) -> None: ...
 
-    def delete_stack(self, name: str, role_arn: str | None) -> None:
+    def delete_stack(self, name: str) -> None:
         """Delete and wait. A stack that does not exist is already deleted."""
         ...
 
@@ -134,12 +132,9 @@ class Aws:
     stacks: StackApi
     buckets: BucketApi
     tables: TableApi
-    # Role CloudFormation assumes for every deploy/delete. None uses the caller's
-    # credentials, which is only sensible for local experiments.
-    cfn_role_arn: str | None = None
 
 
-def connect(region: str, cfn_role_arn: str | None) -> Aws:
+def connect(region: str) -> Aws:
     from rc_infra.buckets import S3Buckets
     from rc_infra.cfn import CloudFormationStacks
     from rc_infra.tables import DynamoTables
@@ -149,7 +144,6 @@ def connect(region: str, cfn_role_arn: str | None) -> Aws:
         stacks=CloudFormationStacks(session.client("cloudformation")),
         buckets=S3Buckets(session.client("s3")),
         tables=DynamoTables(session.client("dynamodb")),
-        cfn_role_arn=cfn_role_arn,
     )
 
 

@@ -119,7 +119,7 @@ def teardown(
     found = inventory(environment, aws)
     if found.app_stack_exists:
         log(f"{environment}: deleting {found.app_stack}")
-        aws.stacks.delete_stack(found.app_stack, aws.cfn_role_arn)
+        aws.stacks.delete_stack(found.app_stack)
     for name in found.tables:
         # Re-read tags immediately before deleting; never trust an earlier listing.
         if not is_managed_by_environment(aws.tables.tags(name), environment):
@@ -133,4 +133,4 @@ def teardown(
         log(f"{environment}: skipped unmanaged table {name}")
 
     log(f"{environment}: deleting {core_stack}")
-    aws.stacks.delete_stack(core_stack, aws.cfn_role_arn)
+    aws.stacks.delete_stack(core_stack)

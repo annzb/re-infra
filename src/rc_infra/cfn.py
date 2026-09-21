@@ -21,6 +21,9 @@ _WAITERS = {
 }
 # Stack operations on these templates take minutes; allow up to an hour.
 _WAITER_CONFIG: Any = {"Delay": 10, "MaxAttempts": 360}
+# rc-platform declares the shared Lambda execution role by name, so every change
+# set must acknowledge named IAM resources or CloudFormation refuses to create it.
+_CAPABILITIES = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"]
 
 
 class DeployError(Exception):
@@ -65,9 +68,8 @@ class CloudFormationStacks:
         template_body: str,
         parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        role_arn: str | None,
     ) -> list[ResourceChange]:
-        change_set_id, changes = self._create_change_set(stack_name, ChangeSetKind.UPDATE, template_body, parameters, tags, role_arn, ())
+        change_set_id, changes = self._create_change_set(stack_name, ChangeSetKind.UPDATE, template_body, parameters, tags, ())
         if change_set_id:
             self._cfn.delete_change_set(ChangeSetName=change_set_id)
         return changes
@@ -79,10 +81,9 @@ class CloudFormationStacks:
         template_body: str,
         parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        role_arn: str | None,
         resources_to_import: Sequence[Mapping[str, Any]] = (),
     ) -> list[ResourceChange]:
-        change_set_id, changes = self._create_change_set(stack_name, kind, template_body, parameters, tags, role_arn, resources_to_import)
+        change_set_id, changes = self._create_change_set(stack_name, kind, template_body, parameters, tags, resources_to_import)
         if not change_set_id:
             return []
         self._cfn.execute_change_set(ChangeSetName=change_set_id)
@@ -97,13 +98,10 @@ class CloudFormationStacks:
     def set_termination_protection(self, name: str, enabled: bool) -> None:
         self._cfn.update_termination_protection(StackName=name, EnableTerminationProtection=enabled)
 
-    def delete_stack(self, name: str, role_arn: str | None) -> None:
+    def delete_stack(self, name: str) -> None:
         if self.get_stack(name) is None:
             return
-        kwargs: dict[str, Any] = {"StackName": name}
-        if role_arn:
-            kwargs["RoleARN"] = role_arn
-        self._cfn.delete_stack(**kwargs)
+        self._cfn.delete_stack(StackName=name)
         try:
             self._cfn.get_waiter("stack_delete_complete").wait(StackName=name, WaiterConfig=_WAITER_CONFIG)
         except WaiterError as exc:
@@ -116,7 +114,6 @@ class CloudFormationStacks:
         template_body: str,
         parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        role_arn: str | None,
         resources_to_import: Sequence[Mapping[str, Any]],
     ) -> tuple[str | None, list[ResourceChange]]:
         kwargs: dict[str, Any] = {
@@ -126,9 +123,8 @@ class CloudFormationStacks:
             "TemplateBody": template_body,
             "Parameters": [{"ParameterKey": key, "ParameterValue": value} for key, value in parameters.items()],
             "Tags": [{"Key": key, "Value": value} for key, value in tags.items()],
+            "Capabilities": _CAPABILITIES,
         }
-        if role_arn:
-            kwargs["RoleARN"] = role_arn
         if resources_to_import:
             kwargs["ResourcesToImport"] = list(resources_to_import)
 

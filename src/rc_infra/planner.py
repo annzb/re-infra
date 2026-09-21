@@ -169,7 +169,7 @@ def _plan_existing_or_create(
             stack_name,
             details=(f"stack status is {stack.status}; resolve it before applying",),
         )
-    changes = aws.stacks.preview(stack_name, body, parameters, tags, aws.cfn_role_arn)
+    changes = aws.stacks.preview(stack_name, body, parameters, tags)
     if not changes:
         return Action(ActionKind.NOOP, target, stack_name)
     return Action(ActionKind.UPDATE, target, stack_name, details=tuple(c.describe() for c in changes))

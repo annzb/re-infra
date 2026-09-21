@@ -49,7 +49,6 @@ class FakeStacks:
         template_body: str,
         parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        role_arn: str | None,
     ) -> list[ResourceChange]:
         return list(self.previews.get(stack_name, []))
 
@@ -60,7 +59,6 @@ class FakeStacks:
         template_body: str,
         parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        role_arn: str | None,
         resources_to_import: Sequence[Mapping[str, Any]] = (),
     ) -> list[ResourceChange]:
         self.events.append(("deploy", kind.value, stack_name))
@@ -71,7 +69,6 @@ class FakeStacks:
                 "template_body": template_body,
                 "parameters": dict(parameters),
                 "tags": dict(tags),
-                "role_arn": role_arn,
                 "resources_to_import": list(resources_to_import),
             }
         )
@@ -89,7 +86,7 @@ class FakeStacks:
         self.events.append(("termination_protection", name, enabled))
         self.stacks[name] = replace(self.stacks[name], termination_protection=enabled)
 
-    def delete_stack(self, name: str, role_arn: str | None) -> None:
+    def delete_stack(self, name: str) -> None:
         if name not in self.stacks:
             return
         self.events.append(("delete_stack", name))
@@ -153,7 +150,6 @@ class FakeAws:
             stacks=self.stacks,
             buckets=self.buckets,
             tables=self.tables,
-            cfn_role_arn="arn:aws:iam::273268178059:role/rc-infra-cfn-exec",
         )
 
 
@@ -226,10 +222,7 @@ def matching_live_config(purpose: str) -> dict[str, Any]:
 def env_stack_resources(environment: str) -> list[StackResource]:
     from rc_infra.env_config import BUCKET_LOGICAL_IDS
 
-    return [
-        *(StackResource(logical_id, bucket_name(environment, purpose), "AWS::S3::Bucket") for purpose, logical_id in BUCKET_LOGICAL_IDS.items()),
-        StackResource("RegionParameter", f"/rc/env/{environment}/region", "AWS::SSM::Parameter"),
-    ]
+    return [StackResource(logical_id, bucket_name(environment, purpose), "AWS::S3::Bucket") for purpose, logical_id in BUCKET_LOGICAL_IDS.items()]
 
 
 def add_removed_environment(fake: FakeAws, name: str = "preview42") -> None:

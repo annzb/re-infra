@@ -59,7 +59,7 @@ def test_import_template_contains_only_imported_resources(env_template: dict[str
     assert result["Parameters"] == env_template["Parameters"]
     assert "Outputs" not in result
     # The original template is untouched.
-    assert "RegionParameter" in env_template["Resources"]
+    assert "SchemaDumpsBucket" in env_template["Resources"]
 
 
 def test_import_template_rejects_unknown_resource(env_template: dict[str, Any]) -> None:

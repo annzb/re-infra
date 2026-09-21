@@ -77,12 +77,12 @@ def test_bucket_owned_by_another_stack_blocks(env_config: EnvConfig, fake: FakeA
 
 def test_existing_stacks_update_or_noop(env_config: EnvConfig, fake: FakeAws) -> None:
     _all_stacks_exist(fake, env_config)
-    fake.stacks.previews["rc-env-dev"] = [ResourceChange("Modify", "RegionParameter", "AWS::SSM::Parameter")]
+    fake.stacks.previews["rc-env-dev"] = [ResourceChange("Modify", "AvatarsBucket", "AWS::S3::Bucket")]
 
     actions = _by_target(build_plan(env_config, fake.aws))
 
     assert actions["dev"].kind is ActionKind.UPDATE
-    assert actions["dev"].details == ("Modify RegionParameter [AWS::SSM::Parameter]",)
+    assert actions["dev"].details == ("Modify AvatarsBucket [AWS::S3::Bucket]",)
     assert actions["prod"].kind is ActionKind.NOOP
     assert actions["platform"].kind is ActionKind.NOOP
 

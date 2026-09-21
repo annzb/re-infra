@@ -4,7 +4,7 @@ A declarative DynamoDB layer: describe a table as a Pydantic model plus a table
 class, and get typed CRUD, index-aware queries, and schema drift detection and
 migration from the same declaration.
 
-Published as the Lambda parent image `rc-dynamo` (see [`Dockerfile`](Dockerfile)).
+Published as the Lambda parent image `rc-lambda-base` (see [`Dockerfile`](Dockerfile)).
 Service images inherit from its immutable digest, so the package is already
 installed — there is nothing to add to a service's requirements.
 
@@ -207,7 +207,7 @@ Unit tests need no AWS and no Docker.
 ### Build the image
 
 [`compose-build-test.yaml`](compose-build-test.yaml) builds it, under the one name the
-image has everywhere - `<registry>/rc-dynamo:<tag>`. The defaults are the real ECR registry
+image has everywhere - `<registry>/rc-lambda-base:<tag>`. The defaults are the real ECR registry
 and `latest`; export `ECR_REGISTRY` or `IMAGE_TAG` to build under a different name.
 `BUILD_CACHE_TO=type=inline` is needed because the default buildx driver cannot export the
 GitHub Actions cache the file asks for on CI; the file header explains it.
@@ -215,7 +215,7 @@ GitHub Actions cache the file asks for on CI; the file header explains it.
 ```bash
 BUILD_CACHE_TO=type=inline docker compose -f compose-build-test.yaml build base
 
-IMAGE=273268178059.dkr.ecr.us-east-1.amazonaws.com/rc-dynamo:latest
+IMAGE=273268178059.dkr.ecr.us-east-1.amazonaws.com/rc-lambda-base:latest
 docker run --rm --platform linux/amd64 --entrypoint python "$IMAGE" \
   -c "import sys, rc_dynamo, rc_dynamo.cli; assert sys.version_info[:2] == (3, 11)"
 docker run --rm --platform linux/amd64 --entrypoint rc-dynamo-sync "$IMAGE" --help

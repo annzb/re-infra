@@ -32,7 +32,6 @@ def test_derived_names(env_config: Any) -> None:
     assert env.core_stack == "rc-env-preview67"
     assert env.app_stack == "rc-app-preview67"
     assert env.table_prefix == "rc-preview67-"
-    assert env.ssm_prefix == "/rc/env/preview67/"
     assert env.buckets["user-corpus"] == "rc-preview67-user-corpus-273268178059"
     assert not env.protected
     assert env_config.get("prod").protected

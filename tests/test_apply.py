@@ -40,8 +40,7 @@ def test_creates_everything_and_protects_persistent_stacks(env_config: EnvConfig
     assert protected == {"rc-platform", "rc-env-prod", "rc-env-staging", "rc-env-dev"}
     prod_deploy = next(d for d in fake.stacks.deploys if d["stack"] == "rc-env-prod")
     assert prod_deploy["tags"] == env_stack_tags("prod")
-    assert prod_deploy["parameters"]["UserPoolId"] == "us-east-1_1GIFBpLKf"
-    assert prod_deploy["role_arn"].endswith(":role/rc-infra-cfn-exec")
+    assert prod_deploy["parameters"] == {"EnvironmentName": "prod"}
 
 
 def test_import_runs_before_full_update(env_config: EnvConfig, fake: FakeAws) -> None:

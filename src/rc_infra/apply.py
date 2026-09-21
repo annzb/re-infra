@@ -68,7 +68,7 @@ def _apply_action(action: Action, config: EnvConfig, aws: Aws, log: Callable[[st
 
     if action.replace_failed_stack:
         log(f"{action.target}: deleting rolled-back stack {action.stack}")
-        aws.stacks.delete_stack(action.stack, aws.cfn_role_arn)
+        aws.stacks.delete_stack(action.stack)
 
     body = template_body(template)
     if action.kind is ActionKind.IMPORT:
@@ -79,7 +79,6 @@ def _apply_action(action: Action, config: EnvConfig, aws: Aws, log: Callable[[st
             template_body(import_template(template, [lid for lid, _ in action.imports])),
             parameters,
             tags,
-            aws.cfn_role_arn,
             resources_to_import=[
                 {
                     "ResourceType": "AWS::S3::Bucket",
@@ -112,7 +111,7 @@ def _deploy(
     log: Callable[[str], None],
 ) -> None:
     log(f"{action.target}: {kind.value.lower()} {action.stack}")
-    changes = aws.stacks.deploy(action.stack, kind, body, parameters, tags, aws.cfn_role_arn)
+    changes = aws.stacks.deploy(action.stack, kind, body, parameters, tags)
     for change in changes:
         log(f"{action.target}:   {change.describe()}")
     if not changes:

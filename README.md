@@ -33,17 +33,15 @@ Configure these under **Settings â†’ Secrets and variables â†’ Actions
 | Variable | Example/source | Used for |
 |---|---|---|
 | `AWS_REGION` | `us-east-1`; must match `envs.yaml` | Region used by the workflows that contact AWS. |
-| `AWS_ROLE_GITHUB` | `GitHubRoleArn` output of `rc-bootstrap` | The only GitHub OIDC role. Every branch assumes it to publish its image; `main` additionally uses it for infrastructure applies. |
-| `AWS_ROLE_CFN` | `CloudFormationExecutionRoleArn` output of `rc-bootstrap` | Role passed to CloudFormation while it evaluates or executes change sets. |
+| `AWS_ROLE_GITHUB` | ARN of the role created manually by an administrator (section 8) | The only GitHub OIDC role. Every branch assumes it to publish its image; `main` additionally uses it for infrastructure applies. |
 
-The workflows pass `AWS_ROLE_CFN` through to the Python CLI under the same name; it is the default for `--cfn-role-arn`.
+CloudFormation is not given a service role: it acts with the credentials of whoever calls it, which in the workflow is `AWS_ROLE_GITHUB`. That role therefore needs every permission a deploy or a teardown requires.
 
 ### Local environment variables
 
 | Variable | Required? | Purpose |
 |---|---|---|
 | `AWS_PROFILE` | Optional | Selects a local AWS CLI/SDK profile, commonly an SSO profile. |
-| `AWS_ROLE_CFN` | Recommended for `apply` | Default for the CLI's `--cfn-role-arn` option. CloudFormation assumes this role. |
 | `AWS_REGION` | Optional locally | Useful for direct AWS CLI commands and required by the LocalStack test command. `rc-infra` itself reads the target region from `envs.yaml`. |
 
 `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID=test`, and `AWS_SECRET_ACCESS_KEY=test` are used only for the guarded LocalStack integration suite described below.
@@ -55,7 +53,7 @@ A push is the only trigger, and exactly one entry point runs: [`main.yml`](.gith
 ### Every branch except main — `non-main.yml`
 
 1. **Validate** ([`validate.yml`](.github/workflows/validate.yml)) checks the lockfile (`uv lock --check`), installs the root project from it, runs Ruff, mypy, and pytest, runs `cfn-lint` on `infra/*.yaml`, and runs `rc-infra validate` on `envs.yaml`.
-2. **Deploy images** ([`deploy-images.yml`](.github/workflows/deploy-images.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-build-test.yaml`](python_packages/rc_dynamo/compose-build-test.yaml), and pushes it to `rc-dynamo:<branch>`.
+2. **Deploy images** ([`deploy-images.yml`](.github/workflows/deploy-images.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-build-test.yaml`](python_packages/rc_dynamo/compose-build-test.yaml), and pushes it to `rc-lambda-base:<branch>`.
 
 A branch run reaches AWS only to push its own image tag; it never deploys infrastructure, and a branch deletion is skipped rather than rebuilt. To see what a change would do to live infrastructure, run a local dry run (section 3).
 
@@ -63,11 +61,11 @@ A branch run reaches AWS only to push its own image tag; it never deploys infras
 
 1. **Validate** — the same workflow, unchanged.
 2. **Deploy infrastructure** ([`deploy-infra.yml`](.github/workflows/deploy-infra.yml)) starts after validation and applies `envs.yaml` together with `infra/*.yaml`.
-   - It assumes `AWS_ROLE_GITHUB` through GitHub OIDC and passes `AWS_ROLE_CFN` to CloudFormation.
+   - It assumes `AWS_ROLE_GITHUB` through GitHub OIDC, and CloudFormation acts with that role's credentials.
    - It runs `rc-infra apply --yes`, which prints the plan, refuses it if anything is `BLOCKED`, and otherwise creates, imports, updates, or removes infrastructure until AWS matches `envs.yaml`. It does not repeat the validation stage's checks.
 3. **Deploy images** starts only after the infrastructure deployment finishes successfully.
    - The same single job runs.
-   - Because the branch is `main`, it pushes `rc-dynamo:main`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
+   - Because the branch is `main`, it pushes `rc-lambda-base:main`. This happens on every main push; Docker skips layers the registry already holds, so re-pushing an unchanged image costs almost nothing.
 
 One `docker compose build` produces the base image and the test image as a single linked build graph, and the push comes after the suite passes, so an untested image can never reach ECR - the suite runs against exactly the bits that get pushed.
 
@@ -78,7 +76,7 @@ One `docker compose build` produces the base image and the test image as a singl
 | `main.yml` | push to `main` | Entry point; orders validate, infrastructure, images | None of its own; grants OIDC to the jobs it calls. |
 | `non-main.yml` | push to any other branch | Entry point; validation and image build/test only | None. |
 | `validate.yml` | `workflow_call` | Lint, type-check, test, `cfn-lint`, `rc-infra validate` | None. |
-| `deploy-infra.yml` | `workflow_call` | Applies `infra/*.yaml` for `envs.yaml`: reconciles `rc-platform` and `rc-env-*`, and tears down environments removed from `envs.yaml` | Main only, using the GitHub role and the CloudFormation execution role. |
+| `deploy-infra.yml` | `workflow_call` | Applies `infra/*.yaml` for `envs.yaml`: reconciles `rc-platform` and `rc-env-*`, and tears down environments removed from `envs.yaml` | Main only, using the GitHub role. |
 | `deploy-images.yml` | `workflow_call` | Builds, tests and publishes the Lambda base image in one job | Every branch pushes its own tag using the GitHub role. |
 
 A called workflow must never declare the same concurrency group as its caller: GitHub reports that as a deadlock and cancels the run. Serialization therefore lives entirely in the entry points, which own `re-infra-<ref>`; `main.yml` sets `cancel-in-progress: false` so an apply already in flight is never cancelled, while `non-main.yml` replaces superseded branch runs. None of the three called workflows declares a group of its own.
@@ -87,12 +85,12 @@ A called workflow must never declare the same concurrency group as its caller: G
 
 | Stack/resource | Owner | Contents |
 |---|---|---|
-| `rc-bootstrap` | This repo; deployed manually once | The GitHub OIDC role and the CloudFormation execution role. |
-| `rc-platform` | This repo | ECR repository `rc-dynamo`. |
-| `rc-env-<name>` | This repo | Environment buckets and `/rc/env/<name>/*` SSM parameters. |
-| `rc-identity` | Future work | Shared Cognito resources; see [`infra/identity.md`](infra/identity.md). |
+| `rc-platform` | This repo | The shared ECR repositories, the four Cognito identity pools, and the shared `LambdaPower` Lambda execution role. |
+| `rc-env-<name>` | This repo | The environment's durable buckets. |
 | `rc-app-<name>` | `retribalize-core` | Application-specific SAM/CloudFormation resources. |
 | DynamoDB application tables | `rc-dynamo-sync` from `retribalize-core` | Application table schemas and migrations; not owned by these CloudFormation templates. |
+
+The GitHub OIDC role is deliberately absent from that table: it is provisioned manually (section 8) and owned by no stack here, because the role that deploys the infrastructure cannot also be deployed by it. The Cognito OIDC identity providers are absent for a different reason — they carry client secrets, so they stay outside every template; see [`infra/identity.md`](infra/identity.md).
 
 This repository does not deploy application code. A successfully created `rc-env-<name>` stack only makes the environment available for a later `retribalize-core` deployment.
 
@@ -130,13 +128,13 @@ Unknown fields are rejected. Environment names must match `^[a-z][a-z0-9]{1,19}$
    ```bash
    uv run rc-infra validate
    aws sso login --profile <profile>
-   AWS_PROFILE=<profile> AWS_ROLE_CFN=<execution-role-arn> uv run rc-infra apply
+   AWS_PROFILE=<profile> uv run rc-infra apply
    ```
 
    Without `--yes`, `apply` is a dry run: it prints the plan and changes nothing.
 
 3. Push the branch. Validation and the image build run; nothing touches AWS.
-4. Merge to `main`. The main run applies `envs.yaml` and publishes the environment's SSM configuration.
+4. Merge to `main`. The main run applies `envs.yaml` and creates the environment's stack and buckets.
 5. Deploy `retribalize-core` into the new environment separately.
 
 ### Remove an environment
@@ -157,20 +155,8 @@ For `preview3` in account `273268178059`:
 | Application stack | `rc-app-preview3` |
 | DynamoDB table prefix | `rc-preview3-` |
 | Buckets | `rc-preview3-{embeddings,user-corpus,avatars,recordings,schema-dumps}-273268178059` |
-| SSM prefix | `/rc/env/preview3/` |
 
-Each core environment stack publishes these `String` parameters and equivalent stack outputs:
-
-| Parameter | Value |
-|---|---|
-| `/rc/env/<name>/region` | AWS region |
-| `/rc/env/<name>/table-prefix` | `rc-<name>-` |
-| `/rc/env/<name>/app-stack-name` | `rc-app-<name>` |
-| `/rc/env/<name>/bucket/<purpose>` | Bucket name for `embeddings`, `user-corpus`, `avatars`, `recordings`, or `schema-dumps` |
-| `/rc/env/<name>/cognito/profile` | Identity profile name |
-| `/rc/env/<name>/cognito/user-pool-id` | Cognito user pool ID |
-| `/rc/env/<name>/cognito/client-id` | Cognito app client ID |
-| `/rc/env/<name>/cognito/domain` | Cognito hosted UI domain |
+These names are derived, not published. An earlier version of the environment stack mirrored them into `/rc/env/<name>/*` SSM parameters as the contract with `retribalize-core`; those parameters have been removed and the contract is being expressed another way. Derive the names from the environment's name as above, or read them from the stack.
 
 ## 4. Infrastructure CLI
 
@@ -187,7 +173,7 @@ Validates config syntax, types, supported schema version, protected environments
 ### `apply`
 
 ```bash
-uv run rc-infra apply [--config PATH] [--cfn-role-arn ARN] [--yes]
+uv run rc-infra apply [--config PATH] [--yes]
 ```
 
 The command:
@@ -203,8 +189,6 @@ The command:
 Without `--yes` it stops there: a dry run that modifies nothing. Building the plan is not literally API read-only — CloudFormation previews require temporary `CreateChangeSet` and `DeleteChangeSet` calls — but it never executes a change set.
 
 With `--yes`, it refuses any plan containing `BLOCKED`, then applies creates/imports/updates before deletions. Failures in one environment are recorded without preventing independent environments from being attempted; any failure produces a nonzero exit code.
-
-`--cfn-role-arn` defaults to `AWS_ROLE_CFN` and identifies the role CloudFormation assumes when evaluating the template.
 
 Routine applies belong in the protected main-branch workflow, not on developer machines.
 
@@ -222,9 +206,9 @@ Routine applies belong in the protected main-branch workflow, not on developer m
 
 | Package | What it is |
 |---|---|
-| [`rc_dynamo`](python_packages/rc_dynamo/README.md) | A declarative DynamoDB layer - typed CRUD, index-aware queries, schema drift detection and migration - published as the Lambda parent image `rc-dynamo`. |
+| [`rc_dynamo`](python_packages/rc_dynamo/README.md) | A declarative DynamoDB layer - typed CRUD, index-aware queries, schema drift detection and migration - published as the Lambda parent image `rc-lambda-base`. |
 
-### The `rc-dynamo` Lambda parent image
+### The `rc-lambda-base` Lambda parent image
 
 `python_packages/rc_dynamo` also defines the parent image for Retribalize Python Lambda services. It centralizes slow, app-independent dependencies and reusable infrastructure code while leaving handlers and service-specific dependencies to child images.
 
@@ -236,16 +220,16 @@ The image contains:
 - the `rc_dynamo` package, including the generic DynamoDB schema framework;
 - the `rc-dynamo-sync` and `rc-dynamo-report` console commands.
 
-It intentionally contains no Lambda handler/CMD, pytest, uv, source tests, or service-specific libraries - the test tooling is locked in a separate project under `tests/` and only ever enters the throwaway test image. Application Dockerfiles must inherit from an immutable digest, not from a branch tag: every tag moves. Resolve the current one from ECR - `aws ecr describe-images --repository-name rc-dynamo --image-ids imageTag=main --query 'imageDetails[0].imageDigest' --output text` - and pin `<registry>/rc-dynamo@<digest>`.
+It intentionally contains no Lambda handler/CMD, pytest, uv, source tests, or service-specific libraries - the test tooling is locked in a separate project under `tests/` and only ever enters the throwaway test image. Application Dockerfiles must inherit from an immutable digest, not from a branch tag: every tag moves. Resolve the current one from ECR - `aws ecr describe-images --repository-name rc-lambda-base --image-ids imageTag=main --query 'imageDetails[0].imageDigest' --output text` - and pin `<registry>/rc-lambda-base@<digest>`.
 
 ### Change reusable code
 
 1. Edit `python_packages/rc_dynamo/src/rc_dynamo/`.
 2. Update unit or integration tests under `python_packages/rc_dynamo/tests/`.
 3. Run the checks - see [the package README](python_packages/rc_dynamo/README.md#2-local-development) for the dependency, venv and test-pipeline commands.
-4. Push the branch. It is built, tested and published as `rc-dynamo:<branch>`, so it can be pulled and tried before merging. Merging to `main` moves `rc-dynamo:main`.
+4. Push the branch. It is built, tested and published as `rc-lambda-base:<branch>`, so it can be pulled and tried before merging. Merging to `main` moves `rc-lambda-base:main`.
 
-Every push republishes the tested image under a tag named after its branch, overwriting what that tag pointed at. There is no `latest`, and there are no per-build tags: a push to `main` moves `rc-dynamo:main`, and the only immutable identity is the repository digest ECR assigns. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
+Every push republishes the tested image under a tag named after its branch, overwriting what that tag pointed at. There is no `latest`, and there are no per-build tags: a push to `main` moves `rc-lambda-base:main`, and the only immutable identity is the repository digest ECR assigns. ECR still scans on push and the findings are visible in the console, but no CI step fails on them.
 
 Because tags move, the image a tag previously pointed at becomes untagged, and `rc-platform`'s lifecycle rule expires untagged images after **30 days**. That window is also the rollback window: refresh any digest pinned in `retribalize-core` within it, or the pin stops resolving.
 
@@ -275,11 +259,10 @@ uv run rc-infra validate
 ```bash
 aws sso login --profile <profile>
 export AWS_PROFILE=<profile>
-export AWS_ROLE_CFN=<rc-infra-cfn-exec-arn>
 uv run rc-infra apply        # no --yes: prints the plan, changes nothing
 ```
 
-The execution-role ARN can be copied from the `CloudFormationExecutionRoleArn` output of `rc-bootstrap`. Your local identity still needs permission to inspect resources, create/delete preview change sets, and pass that execution role.
+CloudFormation acts with your own credentials, so your local identity needs permission to inspect the resources involved and to create and delete preview change sets.
 
 ### Work on `rc_dynamo`
 
@@ -310,40 +293,68 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
 
 `retribalize-core` should:
 
-- refuse to deploy when the target `rc-env-<name>` stack/SSM configuration does not exist;
-- read environment configuration from `/rc/env/<name>/*` rather than maintaining another environment map;
-- build service images from the immutable digest of `rc-dynamo:main`, resolved from ECR rather than from a branch tag, and record that digest in its build manifest, refreshing it within 30 days of being superseded;
+- refuse to deploy when the target `rc-env-<name>` stack does not exist;
+- build service images from the immutable digest of `rc-lambda-base:main`, resolved from ECR rather than from a branch tag, and record that digest in its build manifest, refreshing it within 30 days of being superseded;
 - export `TABLES: Mapping[str, BaseTable]` from its schema module and invoke `rc-dynamo-sync --schema-module <module> --environment <name> --apply`;
 - own all `rc-app-<name>` application stacks and service releases.
 
 ## 8. One-time AWS and GitHub setup
 
-1. With administrator credentials, deploy the bootstrap stack:
+1. With administrator credentials, create the GitHub OIDC role by hand. It is not declared in this repository: the role that deploys the infrastructure cannot be deployed by it, and keeping it out of the templates means a mistake here can never be applied automatically. Requirements:
+
+   - **Trust policy:** `sts:AssumeRoleWithWebIdentity` federated through the account's `token.actions.githubusercontent.com` OIDC provider, with `aud` equal to `sts.amazonaws.com` and `sub` matching `repo:<org>/re-infra:ref:refs/heads/*`. Every branch may assume it, because `deploy-images.yml` publishes an image tag from every branch; only `main.yml` routes it into an infrastructure apply. Create the OIDC provider only if the account does not already have one — an account can hold just one.
+   - **Permissions.** CloudFormation runs with this role's own credentials, so it needs everything a deploy or teardown touches: full management of the `rc-platform` and `rc-env-*` stacks, `cloudformation:DeleteStack` on `rc-app-*` and the underlying Lambda, API Gateway, SQS, CloudFront and log permissions those deletes exercise, `iam:PassRole` on `rc-app-*` roles, push access to the shared ECR repositories, and enough S3 and DynamoDB access to inspect, empty and delete `rc-*` buckets and `ManagedBy=rc-dynamo-sync` tables.
+   - **Denies.** Add explicit denies on deleting the `rc-env-prod`, `rc-env-staging`, `rc-env-dev`, `rc-app-prod`, `rc-app-staging`, `rc-app-dev` and `rc-platform` stacks, the `rc-{prod,staging,dev}-*` buckets and the `rc-{prod,staging,dev}-*` tables. `rc-infra` refuses these itself, but IAM is what makes it impossible.
+
+2. Put the role's ARN in `AWS_ROLE_GITHUB` and add `AWS_REGION=us-east-1`.
+3. Protect `main`: require CODEOWNERS review and the checks from `non-main.yml`, which is what runs on a pull request's source branch. A called workflow reports its checks as `<calling job> / <called job>`, so the validation check is named `validate / Lint, test, validate`. The image check is named `deploy-images / Build, test, and publish`. Jobs that exist only in `main.yml`, such as `deploy-infra`, can never be required checks. Block force pushes and branch deletion.
+4. Create `rc-platform` by **importing**, never by creating. Fifteen of its sixteen resources already exist and hold live state: the four Cognito pools (the prod one had 7,039 user accounts), their app clients and hosted UI domains, the `rc-api` and `rc-matching` image repositories, and the `LambdaPower` role. Only `rc-lambda-base` is new.
+
+   > **Do not run `rc-infra apply --yes` against a non-existent `rc-platform`.** It plans a `CREATE`, and a create would try to make resources that already exist: the hosted UI domain prefixes are globally unique and the role and repository names are taken, so the stack fails and rolls back, and because every resource is `Retain` the rollback can leave duplicate Cognito pools behind. Import first; after that the plan is an ordinary `UPDATE`.
+
+   First, release `rc-api` and `rc-matching` from the `rc-ecr` stack in `retribalize-core` — a resource cannot belong to two stacks. Remove them from its `infra/ecr.yaml` while keeping `DeletionPolicy: Retain` so the repositories and their images survive, and deploy that stack. The images are deployed by digest, so nothing needs rebuilding.
+
+   Then create `rc-platform` from the existing resources. A create-by-import change set may contain **only** the resources being imported, so `rc-lambda-base` is added by the ordinary apply that follows:
 
    ```bash
-   aws cloudformation deploy \
-     --stack-name rc-bootstrap \
-     --template-file infra/roles.yaml \
+   # Identifiers: pool/client IDs and domains are in envs.yaml under identity_profiles.
+   aws cloudformation create-change-set \
+     --stack-name rc-platform \
+     --change-set-name adopt \
+     --change-set-type IMPORT \
      --capabilities CAPABILITY_NAMED_IAM \
-     --parameter-overrides GitHubOrg=annzb GitHubRepo=re-infra
-
-   aws cloudformation update-termination-protection \
-     --stack-name rc-bootstrap \
-     --enable-termination-protection
+     --template-body file://<template-without-rc-lambda-base> \
+     --resources-to-import file://resources-to-import.json
    ```
 
-   Add `CreateOidcProvider=true` only when the AWS account does not already have the GitHub Actions OIDC provider.
+   Each entry names a logical ID from `infra/platform.yaml` and its identifier, for example:
 
-2. Copy the two stack output ARNs into `AWS_ROLE_GITHUB` and `AWS_ROLE_CFN`, and add `AWS_REGION=us-east-1`.
-3. Protect `main`: require CODEOWNERS review and the checks from `non-main.yml`, which is what runs on a pull request's source branch. A called workflow reports its checks as `<calling job> / <called job>`, so the validation check is named `validate / Lint, test, validate`. The image check is named `deploy-images / Build, test, and publish`. Jobs that exist only in `main.yml`, such as `deploy-infra`, can never be required checks. Block force pushes and branch deletion.
-4. Before the first main apply, run `rc-infra apply` without `--yes` using authorized local credentials. Existing buckets should appear as `IMPORT`. If an import is `BLOCKED`, modify the template to match the live bucket before applying; do not modify production data merely to satisfy the template.
+   ```json
+   {"ResourceType":"AWS::Cognito::UserPool","LogicalResourceId":"ProdUserPool",
+    "ResourceIdentifier":{"UserPoolId":"us-east-1_1GIFBpLKf"}}
+   {"ResourceType":"AWS::ECR::Repository","LogicalResourceId":"ApiImageRepository",
+    "ResourceIdentifier":{"RepositoryName":"rc-api"}}
+   ```
+
+   Client entries also carry `ClientId`, domain entries `Domain`, and the role entry `RoleName`.
+
+   **Read the change set before executing it.** Every resource must report `Import`, and none may report a replacement. Then confirm nothing moved and that `rc-infra` agrees the template matches:
+
+   ```bash
+   aws cognito-idp describe-user-pool --user-pool-id us-east-1_1GIFBpLKf \
+     --query 'UserPool.EstimatedNumberOfUsers'
+   uv run rc-infra apply     # rc-platform: UPDATE adding only rc-lambda-base
+   ```
+
+   That apply must add `rc-lambda-base` and touch nothing else. If it proposes changing or replacing a pool, a client, a domain or the role, the template does not match what was imported — fix the template, and never apply it.
+
+5. Before the first main apply, run `rc-infra apply` without `--yes` using authorized local credentials. Existing buckets should appear as `IMPORT`. If an import is `BLOCKED`, modify the template to match the live bucket before applying; do not modify production data merely to satisfy the template.
 
 ## 9. Troubleshooting
 
 - **Find what ran:** GitHub Actions, then the **Main** or **Non-main** run summary for the branch.
 - **Retry an interrupted deployment:** re-run the failed jobs or push again. Apply and teardown operations are designed to be idempotent.
 - **Inspect an environment stack:** `aws cloudformation describe-stacks --stack-name rc-env-<name>`.
-- **Inspect published config:** `aws ssm get-parameters-by-path --path /rc/env/<name>/ --recursive`.
 - **Resolve `BLOCKED`:** read the action details. Busy/broken CloudFormation stacks must stabilize or be repaired; import candidates require the template to match live bucket settings.
-- **Roll back the base image:** pin a prior immutable ECR digest in `retribalize-core`. List what is still available with `aws ecr describe-images --repository-name rc-dynamo`; tags name the branch they came from, and superseded images are untagged and expire 30 days later.
+- **Roll back the base image:** pin a prior immutable ECR digest in `retribalize-core`. List what is still available with `aws ecr describe-images --repository-name rc-lambda-base`; tags name the branch they came from, and superseded images are untagged and expire 30 days later.
 - **Avoid console drift:** do not repair stack-owned resources manually in the AWS console. Change `infra/*.yaml` or `envs.yaml` and apply through the workflow.

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ BUCKET_LOGICAL_IDS: dict[str, str] = {
     "avatars": "AvatarsBucket",
     "recordings": "RecordingsBucket",
     "schema-dumps": "SchemaDumpsBucket",
+    "property-registry": "PropertyRegistryBucket",
 }
 
 RESOURCE_PREFIX = "rc"
@@ -131,6 +133,10 @@ class EnvConfig:
     account_id: str
     region: str
     environments: tuple[Environment, ...]
+    # Kept whole, not just per environment: the identity resources belong to the
+    # platform stack, which has no environment to resolve them through, and their
+    # IDs are how an import identifies the pools AWS already assigned.
+    identity_profiles: Mapping[str, IdentityProfile] = field(default_factory=dict)
 
     @property
     def names(self) -> frozenset[str]:
@@ -228,6 +234,7 @@ def parse_env_config(raw: Any) -> EnvConfig:
         account_id=parsed.account_id,
         region=parsed.region,
         environments=tuple(environments),
+        identity_profiles=dict(parsed.identity_profiles),
     )
 
 

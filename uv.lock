@@ -87,8 +87,17 @@ wheels = [
 cloudformation = [
     { name = "mypy-boto3-cloudformation" },
 ]
+cognito-idp = [
+    { name = "mypy-boto3-cognito-idp" },
+]
 dynamodb = [
     { name = "mypy-boto3-dynamodb" },
+]
+ecr = [
+    { name = "mypy-boto3-ecr" },
+]
+iam = [
+    { name = "mypy-boto3-iam" },
 ]
 s3 = [
     { name = "mypy-boto3-s3" },
@@ -252,6 +261,18 @@ wheels = [
 ]
 
 [[package]]
+name = "mypy-boto3-cognito-idp"
+version = "1.43.83"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/07/c9/4f0f54e51138e8a791ba104c1ce7213582fceb69015b5403cdc2e94e330c/mypy_boto3_cognito_idp-1.43.83.tar.gz", hash = "sha256:338f0e3a30b26827f08c538893185a7bd13b64e55ffb531e8a47cdaacc6db8e6", size = 55796, upload-time = "2026-08-28T19:47:03.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/16/87/b17062844acedf0ab12dddca8276ce57a09d039242c3d60a1646a0723100/mypy_boto3_cognito_idp-1.43.83-py3-none-any.whl", hash = "sha256:446c86afcd02855fc976f0ec44b19f6881814755789a2e9209294a3190f3253e", size = 62030, upload-time = "2026-08-28T19:46:59.839Z" },
+]
+
+[[package]]
 name = "mypy-boto3-dynamodb"
 version = "1.43.64"
 source = { registry = "https://pypi.org/simple" }
@@ -261,6 +282,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/26/7b/6a7649813c7c367c405182d70d5fc4ff5fc531a8d5b0d4d08fa68276ba7c/mypy_boto3_dynamodb-1.43.64.tar.gz", hash = "sha256:8597ddd7d5f92cf00e7aa0875993e5cf09988f017eef41b94d47c08e7675b5d0", size = 50088, upload-time = "2026-08-04T21:37:37.911Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/3a/34904b687c40e88f004df3ae010d4d64093dab6506eafc9f6f322ef8eeb6/mypy_boto3_dynamodb-1.43.64-py3-none-any.whl", hash = "sha256:74f59f05544e7682bd2ee284fea9dc859d6ca5984f60f80c0ac54aa744115ead", size = 60304, upload-time = "2026-08-04T21:37:34.946Z" },
+]
+
+[[package]]
+name = "mypy-boto3-ecr"
+version = "1.43.73"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e9/f1/704db62d36b42b8bf5b43a913c1d9ee0a85e9e45c28ce7604e6a28dc8d30/mypy_boto3_ecr-1.43.73.tar.gz", hash = "sha256:d8ec39f4be668aa9e8835c4f36ccc6fe832ee2d24e7de3e261dc69186462c90a", size = 36968, upload-time = "2026-08-17T21:16:49.275Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2f/50/ac66c5303b061257d5a8f4fe43886ec9707ab67a74fbea80ccfb7c744ec1/mypy_boto3_ecr-1.43.73-py3-none-any.whl", hash = "sha256:d30467573e922cb07762849c1c91d66d981ce8f6fb192c48dc8331ee5496ce87", size = 43091, upload-time = "2026-08-17T21:16:46.297Z" },
+]
+
+[[package]]
+name = "mypy-boto3-iam"
+version = "1.43.70"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/04/eb/fc615caf1a4ba6e28c874e286f0bb9f4af5af5b1b2b493e09d655f6bc0bc/mypy_boto3_iam-1.43.70.tar.gz", hash = "sha256:68bf4e6890ecaae76852d501090b8fd0b0438424009082a20bfe612f93de28fa", size = 91526, upload-time = "2026-08-12T19:27:46.787Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/12/5f/c55267013818a0bc582e9a0acdfa6ac882610deef956f1bf6ae6d6a8e4e1/mypy_boto3_iam-1.43.70-py3-none-any.whl", hash = "sha256:88363b6c33062c7e97813c73e9abb498e6a0aa7e53622925329aefefbc529ee7", size = 97195, upload-time = "2026-08-12T19:27:45.483Z" },
 ]
 
 [[package]]
@@ -451,7 +496,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "boto3-stubs", extra = ["cloudformation", "dynamodb", "s3", "sts"] },
+    { name = "boto3-stubs", extra = ["cloudformation", "cognito-idp", "dynamodb", "ecr", "iam", "s3", "sts"] },
     { name = "cfn-lint" },
     { name = "mypy" },
     { name = "pytest" },
@@ -468,7 +513,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "boto3-stubs", extras = ["cloudformation", "dynamodb", "s3", "sts"] },
+    { name = "boto3-stubs", extras = ["cloudformation", "cognito-idp", "dynamodb", "ecr", "iam", "s3", "sts"] },
     { name = "cfn-lint", specifier = ">=1.0" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pytest", specifier = ">=8" },

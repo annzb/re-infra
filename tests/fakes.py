@@ -139,6 +139,19 @@ class FakeTables:
 
 
 @dataclass
+class FakeResources:
+    """Non-bucket resources that exist in AWS, keyed by (type, sorted identifier)."""
+
+    live: set[tuple[str, tuple[tuple[str, str], ...]]] = field(default_factory=set)
+
+    def add(self, resource_type: str, identifier: Mapping[str, str]) -> None:
+        self.live.add((resource_type, tuple(sorted(identifier.items()))))
+
+    def exists(self, resource_type: str, identifier: Mapping[str, str]) -> bool:
+        return (resource_type, tuple(sorted(identifier.items()))) in self.live
+
+
+@dataclass
 class FakeAws:
     events: list[tuple[Any, ...]] = field(default_factory=list)
 
@@ -146,10 +159,12 @@ class FakeAws:
         self.stacks = FakeStacks(self.events)
         self.buckets = FakeBuckets(self.events)
         self.tables = FakeTables(self.events)
+        self.resources = FakeResources()
         self.aws = Aws(
             stacks=self.stacks,
             buckets=self.buckets,
             tables=self.tables,
+            resources=self.resources,
         )
 
 
@@ -193,7 +208,14 @@ def matching_live_config(purpose: str) -> dict[str, Any]:
             ]
         },
     }.get(purpose)
-    cors = {"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["PUT"], "AllowedOrigins": ["*"]}]} if purpose == "user-corpus" else None
+    cors = {
+        "user-corpus": {"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["PUT"], "AllowedOrigins": ["*"]}]},
+        "avatars": _browser_cors(["GET", "HEAD", "POST", "PUT"]),
+        "embeddings": _browser_cors(["GET", "HEAD", "POST", "PUT"]),
+        "property-registry": _browser_cors(["GET", "HEAD", "PUT"]),
+    }.get(purpose)
+    # Avatars serve public content through a bucket policy, so public access is open.
+    blocked = purpose != "avatars"
     return {
         "encryption": {
             "ServerSideEncryptionConfiguration": {
@@ -207,15 +229,29 @@ def matching_live_config(purpose: str) -> dict[str, Any]:
         },
         "public_access_block": {
             "PublicAccessBlockConfiguration": {
-                "BlockPublicAcls": True,
-                "BlockPublicPolicy": True,
-                "IgnorePublicAcls": True,
-                "RestrictPublicBuckets": True,
+                "BlockPublicAcls": blocked,
+                "BlockPublicPolicy": blocked,
+                "IgnorePublicAcls": blocked,
+                "RestrictPublicBuckets": blocked,
             }
         },
-        "versioning": {},
+        "versioning": {"Status": "Enabled"} if purpose == "property-registry" else {},
         "lifecycle": lifecycle,
         "cors": cors,
+    }
+
+
+def _browser_cors(methods: list[str]) -> dict[str, Any]:
+    return {
+        "CORSRules": [
+            {
+                "AllowedHeaders": ["*"],
+                "AllowedMethods": methods,
+                "AllowedOrigins": ["*"],
+                "ExposeHeaders": ["ETag"],
+                "MaxAgeSeconds": 3600,
+            }
+        ]
     }
 
 

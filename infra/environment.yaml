@@ -40,6 +40,17 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      # rc-prod-embeddings already carries this rule and the other environments do
+      # not. Declaring it matches prod exactly -- so adopting prod changes nothing --
+      # and adds a rule elsewhere that grants no access on a bucket whose public
+      # access is blocked.
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, HEAD, POST, PUT]
+            AllowedOrigins: ["*"]
+            ExposedHeaders: [ETag]
+            MaxAge: 3600
 
   UserCorpusBucket:
     Type: AWS::S3::Bucket
@@ -69,6 +80,14 @@ Resources:
             AllowedMethods: [PUT]
             AllowedOrigins: ["*"]
 
+  # The one public bucket. It serves avatars, project banners, user galleries, blog
+  # covers and event photos straight to browsers through a bucket policy granting
+  # s3:GetObject on those prefixes. The policy itself is NOT declared here: its
+  # statement list differs per environment, and it is a separate resource that the
+  # import leaves alone.
+  #
+  # Public access must therefore stay unblocked. Setting BlockPublicPolicy would
+  # reject that policy and every image in the product would stop loading.
   AvatarsBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -81,10 +100,17 @@ Resources:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
       PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, HEAD, POST, PUT]
+            AllowedOrigins: ["*"]
+            ExposedHeaders: [ETag]
+            MaxAge: 3600
 
   RecordingsBucket:
     Type: AWS::S3::Bucket
@@ -124,3 +150,32 @@ Resources:
           - Id: ExpireSchemaDumps
             Status: Enabled
             ExpirationInDays: 30
+
+  # Durable per-environment registry of property definitions. Versioned, because a
+  # definition that is overwritten by mistake has to be recoverable. It exists today
+  # for prod, staging, dev and preview89; the rest are created.
+  PropertyRegistryBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: "rc-${EnvironmentName}-property-registry-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, HEAD, PUT]
+            AllowedOrigins: ["*"]
+            ExposedHeaders: [ETag]
+            MaxAge: 3600

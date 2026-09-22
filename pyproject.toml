@@ -15,7 +15,7 @@ rc-infra = "rc_infra.cli:main"
 
 [dependency-groups]
 dev = [
-  "boto3-stubs[cloudformation,dynamodb,s3,sts]",
+  "boto3-stubs[cloudformation,cognito-idp,dynamodb,ecr,iam,s3,sts]",
   "cfn-lint>=1.0",
   "mypy>=1.11",
   "pytest>=8",

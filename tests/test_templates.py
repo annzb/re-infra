@@ -10,8 +10,10 @@ from rc_infra.templates import (
     ENVIRONMENT_TEMPLATE_PATH,
     PLATFORM_TEMPLATE_PATH,
     environment_parameters,
+    identity_logical_ids,
     import_template,
     load_template,
+    platform_import_targets,
 )
 
 
@@ -65,3 +67,53 @@ def test_import_template_contains_only_imported_resources(env_template: dict[str
 def test_import_template_rejects_unknown_resource(env_template: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match="NopeBucket"):
         import_template(env_template, ["NopeBucket"])
+
+
+# ── rc-platform ─────────────────────────────────────────────────────
+
+PLATFORM = load_template(PLATFORM_TEMPLATE_PATH)
+
+
+def test_every_identity_profile_has_resources(env_config: Any) -> None:
+    """The <Profile>UserPool naming convention must not drift from envs.yaml."""
+    for profile in env_config.identity_profiles:
+        for logical_id in identity_logical_ids(profile):
+            assert logical_id in PLATFORM["Resources"], f"{profile}: {logical_id} missing from platform.yaml"
+
+
+def test_an_unknown_profile_fails_loudly(env_config: Any) -> None:
+    from dataclasses import replace
+
+    from rc_infra.env_config import IdentityProfile
+
+    broken = replace(
+        env_config,
+        identity_profiles={"nosuch": IdentityProfile(user_pool_id="us-east-1_aaaa", client_id="c", domain="d")},
+    )
+    with pytest.raises(ValueError, match="nosuch"):
+        platform_import_targets(broken, PLATFORM)
+
+
+def test_platform_import_targets_cover_every_adoptable_resource(env_config: Any) -> None:
+    targets = platform_import_targets(env_config, PLATFORM)
+    by_type: dict[str, int] = {}
+    for target in targets:
+        by_type[target.resource_type] = by_type.get(target.resource_type, 0) + 1
+
+    profiles = len(env_config.identity_profiles)
+    assert by_type == {
+        "AWS::ECR::Repository": 3,
+        "AWS::IAM::Role": 1,
+        "AWS::Cognito::UserPool": profiles,
+        "AWS::Cognito::UserPoolClient": profiles,
+        "AWS::Cognito::UserPoolDomain": profiles,
+    }
+    # Every target names a resource the template actually declares.
+    assert {t.logical_id for t in targets} <= set(PLATFORM["Resources"])
+
+
+def test_every_import_target_type_can_be_looked_up(env_config: Any) -> None:
+    """A target the existence check cannot answer would silently become a CREATE."""
+    from rc_infra.resources import SUPPORTED_TYPES
+
+    assert {t.resource_type for t in platform_import_targets(env_config, PLATFORM)} <= SUPPORTED_TYPES

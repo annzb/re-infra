@@ -10,10 +10,21 @@ from typing import Any
 
 import yaml
 
-from rc_infra.env_config import BUCKET_LOGICAL_IDS, Environment
+from rc_infra.aws import ImportTarget
+from rc_infra.env_config import BUCKET_LOGICAL_IDS, EnvConfig, Environment
 
 PLATFORM_TEMPLATE_PATH = Path("infra/platform.yaml")
 ENVIRONMENT_TEMPLATE_PATH = Path("infra/environment.yaml")
+
+# Logical IDs in platform.yaml whose resource already existed before this repository
+# did, mapped to the template property that carries their CloudFormation identifier.
+# Everything here is adopted by import, never created.
+_SELF_IDENTIFIED_PLATFORM_RESOURCES: dict[str, tuple[str, str]] = {
+    "LambdaBaseImageRepository": ("AWS::ECR::Repository", "RepositoryName"),
+    "ApiImageRepository": ("AWS::ECR::Repository", "RepositoryName"),
+    "MatchingImageRepository": ("AWS::ECR::Repository", "RepositoryName"),
+    "LambdaPowerRole": ("AWS::IAM::Role", "RoleName"),
+}
 
 MANAGED_BY_TAG = "ManagedBy"
 MANAGED_BY_VALUE = "re-infra"
@@ -63,6 +74,43 @@ def import_template(template: dict[str, Any], logical_ids: Iterable[str]) -> dic
     }
     result["Resources"] = {logical_id: copy.deepcopy(template["Resources"][logical_id]) for logical_id in ids}
     return result
+
+
+def identity_logical_ids(profile: str) -> tuple[str, str, str]:
+    """The pool, client and domain logical IDs platform.yaml declares for a profile."""
+    prefix = profile.capitalize()
+    return f"{prefix}UserPool", f"{prefix}UserPoolClient", f"{prefix}UserPoolDomain"
+
+
+def platform_import_targets(config: EnvConfig, template: dict[str, Any]) -> list[ImportTarget]:
+    """Every rc-platform resource that can be adopted rather than created.
+
+    The caller filters these by what actually exists: a resource listed here and
+    absent from AWS is simply created by the update that follows the import.
+    """
+    resources = template["Resources"]
+    targets: list[ImportTarget] = []
+
+    for logical_id, (resource_type, property_name) in _SELF_IDENTIFIED_PLATFORM_RESOURCES.items():
+        if logical_id not in resources:
+            continue
+        name = resources[logical_id]["Properties"][property_name]
+        targets.append(ImportTarget(logical_id, resource_type, {property_name: name}, name))
+
+    for profile_name, profile in sorted(config.identity_profiles.items()):
+        pool_id, client_id, domain_id = identity_logical_ids(profile_name)
+        missing = [logical_id for logical_id in (pool_id, client_id, domain_id) if logical_id not in resources]
+        if missing:
+            raise ValueError(f"identity profile {profile_name!r} has no {missing} in {PLATFORM_TEMPLATE_PATH}")
+        # The pool and client IDs were assigned by AWS and are recorded in envs.yaml.
+        # The domain prefix is a template property; envs.yaml holds the full hostname.
+        pool = {"UserPoolId": profile.user_pool_id}
+        domain = resources[domain_id]["Properties"]["Domain"]
+        targets.append(ImportTarget(pool_id, "AWS::Cognito::UserPool", pool, profile.user_pool_id))
+        targets.append(ImportTarget(client_id, "AWS::Cognito::UserPoolClient", {**pool, "ClientId": profile.client_id}, profile.client_id))
+        targets.append(ImportTarget(domain_id, "AWS::Cognito::UserPoolDomain", {**pool, "Domain": domain}, domain))
+
+    return targets
 
 
 def bucket_properties(template: dict[str, Any], purpose: str) -> dict[str, Any]:

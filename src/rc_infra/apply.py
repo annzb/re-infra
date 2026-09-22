@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from rc_infra.aws import Aws, ChangeSetKind
-from rc_infra.env_config import EnvConfig
+from rc_infra.env_config import PROTECTED_ENVIRONMENTS, EnvConfig
 from rc_infra.planner import PLATFORM_TARGET, Action, ActionKind, Plan
 from rc_infra.teardown import teardown
 from rc_infra.templates import (
@@ -32,13 +32,21 @@ class ApplyResult:
 
 
 def apply_plan(plan: Plan, config: EnvConfig, aws: Aws, log: Callable[[str], None] = print) -> ApplyResult:
-    if plan.blocked:
-        targets = ", ".join(a.target for a in plan.blocked)
-        raise ApplyRefused(f"plan has blocked actions ({targets}); nothing was applied")
+    # A blocked preview is that preview's problem; a blocked protected environment or
+    # a blocked platform stack means the shared foundation is wrong, and applying the
+    # rest on top of it would be building on something nobody has looked at yet.
+    halting = [a for a in plan.blocked if a.target in PROTECTED_ENVIRONMENTS or a.target == PLATFORM_TARGET]
+    if halting:
+        targets = ", ".join(a.target for a in halting)
+        raise ApplyRefused(f"plan blocks {targets}; nothing was applied")
 
     result = ApplyResult()
     # Creates and updates first, deletions last.
     for action in sorted(plan.actions, key=lambda a: a.kind is ActionKind.DELETE):
+        if action.kind is ActionKind.BLOCKED:
+            log(f"{action.target}: SKIPPED: blocked, see the plan above")
+            result.failed.append(f"{action.target}: blocked")
+            continue
         try:
             _apply_action(action, config, aws, log)
         except Exception as exc:  # one environment's failure must not stop the others
@@ -72,20 +80,20 @@ def _apply_action(action: Action, config: EnvConfig, aws: Aws, log: Callable[[st
 
     body = template_body(template)
     if action.kind is ActionKind.IMPORT:
-        log(f"{action.target}: importing {', '.join(name for _, name in action.imports)}")
+        log(f"{action.target}: importing {', '.join(target.describe for target in action.imports)}")
         aws.stacks.deploy(
             action.stack,
             ChangeSetKind.IMPORT,
-            template_body(import_template(template, [lid for lid, _ in action.imports])),
+            template_body(import_template(template, [target.logical_id for target in action.imports])),
             parameters,
             tags,
             resources_to_import=[
                 {
-                    "ResourceType": "AWS::S3::Bucket",
-                    "LogicalResourceId": logical_id,
-                    "ResourceIdentifier": {"BucketName": bucket},
+                    "ResourceType": target.resource_type,
+                    "LogicalResourceId": target.logical_id,
+                    "ResourceIdentifier": dict(target.identifier),
                 }
-                for logical_id, bucket in action.imports
+                for target in action.imports
             ],
         )
         _deploy(action, ChangeSetKind.UPDATE, body, parameters, tags, aws, log)

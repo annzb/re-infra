@@ -19,25 +19,26 @@ def test_missing_lifecycle_is_a_diff() -> None:
     live = matching_live_config("user-corpus")
     live["lifecycle"] = None
     diffs = config_diff(bucket_properties(TEMPLATE, "user-corpus"), live)
-    assert len(diffs) == 1 and diffs[0].startswith("lifecycle:")
+    assert [(d.group, d.blocking) for d in diffs] == [("lifecycle", True)]
 
 
 def test_extra_live_cors_is_a_diff() -> None:
     live = matching_live_config("avatars")
     live["cors"] = {"CORSRules": [{"AllowedMethods": ["GET"], "AllowedOrigins": ["*"]}]}
-    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "avatars"), live)] == ["cors"]
+    # CORS is advisory: the import proceeds and the following update reconciles it.
+    assert [(d.group, d.blocking) for d in config_diff(bucket_properties(TEMPLATE, "avatars"), live)] == [("cors", False)]
 
 
 def test_versioning_enabled_live_is_a_diff() -> None:
     live = matching_live_config("embeddings")
     live["versioning"] = {"Status": "Enabled"}
-    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "embeddings"), live)] == ["versioning"]
+    assert [(d.group, d.blocking) for d in config_diff(bucket_properties(TEMPLATE, "embeddings"), live)] == [("versioning", True)]
 
 
 def test_missing_public_access_block_is_a_diff() -> None:
     live = matching_live_config("recordings")
     live["public_access_block"] = None
-    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "recordings"), live)] == ["public_access_block"]
+    assert [(d.group, d.blocking) for d in config_diff(bucket_properties(TEMPLATE, "recordings"), live)] == [("public_access_block", True)]
 
 
 def test_legacy_prefix_field_and_rule_order_are_normalized() -> None:
@@ -59,9 +60,16 @@ def test_legacy_prefix_field_and_rule_order_are_normalized() -> None:
 def test_unmodelled_live_lifecycle_settings_are_a_diff() -> None:
     live = matching_live_config("user-corpus")
     live["lifecycle"]["Rules"][0]["Transitions"] = [{"Days": 30, "StorageClass": "GLACIER"}]
-    assert [d.split(":")[0] for d in config_diff(bucket_properties(TEMPLATE, "user-corpus"), live)] == ["lifecycle"]
+    assert [(d.group, d.blocking) for d in config_diff(bucket_properties(TEMPLATE, "user-corpus"), live)] == [("lifecycle", True)]
 
 
 def test_unsupported_template_property_fails_loudly() -> None:
     with pytest.raises(ValueError, match="OwnershipControls"):
         config_diff({"OwnershipControls": {}}, matching_live_config("avatars"))
+
+
+def test_public_avatars_bucket_must_not_be_blocked() -> None:
+    """Blocking public access would reject the policy that serves every avatar."""
+    live = matching_live_config("avatars")
+    live["public_access_block"]["PublicAccessBlockConfiguration"]["BlockPublicPolicy"] = True
+    assert [(d.group, d.blocking) for d in config_diff(bucket_properties(TEMPLATE, "avatars"), live)] == [("public_access_block", True)]

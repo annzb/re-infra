@@ -59,6 +59,19 @@ class ResourceChange:
 
 
 @dataclass(frozen=True)
+class ImportTarget:
+    """One existing resource a stack adopts, and how CloudFormation identifies it."""
+
+    logical_id: str
+    resource_type: str
+    # The ResourceIdentifier CloudFormation expects for this type, for example
+    # {"UserPoolId": ..., "ClientId": ...}. Every key is part of the primary identifier.
+    identifier: Mapping[str, str]
+    # What the plan prints: the physical name a reader would recognise.
+    describe: str
+
+
+@dataclass(frozen=True)
 class StackResource:
     logical_id: str
     physical_id: str
@@ -117,6 +130,12 @@ class BucketApi(Protocol):
         ...
 
 
+class ResourceApi(Protocol):
+    def exists(self, resource_type: str, identifier: Mapping[str, str]) -> bool:
+        """Whether the resource CloudFormation would import already exists."""
+        ...
+
+
 class TableApi(Protocol):
     def list_names(self, prefix: str) -> list[str]: ...
 
@@ -132,11 +151,13 @@ class Aws:
     stacks: StackApi
     buckets: BucketApi
     tables: TableApi
+    resources: ResourceApi
 
 
 def connect(region: str) -> Aws:
     from rc_infra.buckets import S3Buckets
     from rc_infra.cfn import CloudFormationStacks
+    from rc_infra.resources import LiveResources
     from rc_infra.tables import DynamoTables
 
     session = boto3.Session(region_name=region)
@@ -144,6 +165,7 @@ def connect(region: str) -> Aws:
         stacks=CloudFormationStacks(session.client("cloudformation")),
         buckets=S3Buckets(session.client("s3")),
         tables=DynamoTables(session.client("dynamodb")),
+        resources=LiveResources(session),
     )
 
 

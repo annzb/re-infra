@@ -4,7 +4,8 @@ from typing import Any
 
 from rc_infra.aws import ResourceChange
 from rc_infra.env_config import EnvConfig
-from rc_infra.planner import Action, ActionKind, Plan, build_plan, render_text
+from rc_infra.planner import PLATFORM_TARGET, Action, ActionKind, Plan, build_plan, render_text
+from rc_infra.templates import PLATFORM_TEMPLATE_PATH, load_template, platform_import_targets
 from tests.fakes import (
     FakeAws,
     add_removed_environment,
@@ -42,26 +43,44 @@ def test_existing_matching_buckets_are_imported(env_config: EnvConfig, fake: Fak
     action = _by_target(build_plan(env_config, fake.aws))["prod"]
 
     assert action.kind is ActionKind.IMPORT
-    assert dict(action.imports) == {
+    assert {target.logical_id: target.describe for target in action.imports} == {
         "EmbeddingsBucket": bucket_name("prod", "embeddings"),
         "UserCorpusBucket": bucket_name("prod", "user-corpus"),
         "AvatarsBucket": bucket_name("prod", "avatars"),
         "RecordingsBucket": bucket_name("prod", "recordings"),
     }
-    assert action.details == (f"then create bucket {bucket_name('prod', 'schema-dumps')}",)
+    assert {target.resource_type for target in action.imports} == {"AWS::S3::Bucket"}
+    assert action.imports[0].identifier == {"BucketName": action.imports[0].describe}
+    assert set(action.details) == {
+        f"then create bucket {bucket_name('prod', 'schema-dumps')}",
+        f"then create bucket {bucket_name('prod', 'property-registry')}",
+    }
 
 
 def test_mismatched_existing_bucket_blocks(env_config: EnvConfig, fake: FakeAws) -> None:
     for purpose in PROD_EXISTING:
         fake.buckets.live[bucket_name("prod", purpose)] = matching_live_config(purpose)
-    fake.buckets.live[bucket_name("prod", "user-corpus")]["cors"] = None
+    fake.buckets.live[bucket_name("prod", "user-corpus")]["lifecycle"] = None
 
     plan = build_plan(env_config, fake.aws)
     action = _by_target(plan)["prod"]
 
     assert action.kind is ActionKind.BLOCKED
-    assert any(bucket_name("prod", "user-corpus") in d and "cors" in d for d in action.details)
+    assert any(bucket_name("prod", "user-corpus") in d and "lifecycle" in d for d in action.details)
     assert plan.blocked == [action]
+
+
+def test_cors_difference_is_advisory_and_still_imports(env_config: EnvConfig, fake: FakeAws) -> None:
+    """An older CORS rule must not hold up an adoption; the update reconciles it."""
+    for purpose in PROD_EXISTING:
+        fake.buckets.live[bucket_name("prod", purpose)] = matching_live_config(purpose)
+    name = bucket_name("prod", "avatars")
+    fake.buckets.live[name]["cors"] = {"CORSRules": [{"AllowedMethods": ["GET"], "AllowedOrigins": ["*"]}]}
+
+    action = _by_target(build_plan(env_config, fake.aws))["prod"]
+
+    assert action.kind is ActionKind.IMPORT
+    assert any(name in detail and "reconcile" in detail for detail in action.details)
 
 
 def test_bucket_owned_by_another_stack_blocks(env_config: EnvConfig, fake: FakeAws) -> None:
@@ -161,4 +180,98 @@ def test_blocked_and_deleted_are_listed_first(env_config: EnvConfig, fake: FakeA
     assert kinds[:2] == [ActionKind.BLOCKED, ActionKind.DELETE]
     lines = render_text(plan).splitlines()
     assert lines[0].startswith("WARNING: applying deletes 1 environment(s): preview42")
-    assert lines[2].startswith("BLOCKED  dev")
+    assert lines[2].startswith("WARNING: dev is blocked")
+    assert lines[4].startswith("BLOCKED  dev")
+
+
+# ── rc-platform adoption ────────────────────────────────────────────
+
+PLATFORM_TEMPLATE = load_template(PLATFORM_TEMPLATE_PATH)
+
+
+def _identity_exists(fake: FakeAws, env_config: EnvConfig) -> list[Any]:
+    """Mark every Cognito resource and the shared role as already live."""
+    targets = [t for t in platform_import_targets(env_config, PLATFORM_TEMPLATE) if t.resource_type != "AWS::ECR::Repository"]
+    for target in targets:
+        fake.resources.add(target.resource_type, target.identifier)
+    return targets
+
+
+def test_platform_adopts_existing_identity_resources(env_config: EnvConfig, fake: FakeAws) -> None:
+    expected = _identity_exists(fake, env_config)
+
+    action = _by_target(build_plan(env_config, fake.aws))[PLATFORM_TARGET]
+
+    assert action.kind is ActionKind.IMPORT
+    assert {t.logical_id for t in action.imports} == {t.logical_id for t in expected}
+    # The repositories do not exist, so they are created by the update that follows.
+    assert set(action.details) == {
+        "then create LambdaBaseImageRepository",
+        "then create ApiImageRepository",
+        "then create MatchingImageRepository",
+    }
+
+
+def test_platform_import_carries_real_identifiers(env_config: EnvConfig, fake: FakeAws) -> None:
+    _identity_exists(fake, env_config)
+
+    action = _by_target(build_plan(env_config, fake.aws))[PLATFORM_TARGET]
+    by_id = {t.logical_id: t for t in action.imports}
+
+    assert by_id["ProdUserPool"].identifier == {"UserPoolId": "us-east-1_1GIFBpLKf"}
+    assert by_id["ProdUserPoolClient"].identifier == {
+        "UserPoolId": "us-east-1_1GIFBpLKf",
+        "ClientId": "10248ltom7g0tgb22si919e9ak",
+    }
+    # The domain identifier is the prefix from the template, not envs.yaml's hostname.
+    assert by_id["ProdUserPoolDomain"].identifier == {"UserPoolId": "us-east-1_1GIFBpLKf", "Domain": "rc-prod-v2"}
+    assert by_id["LambdaPowerRole"].identifier == {"RoleName": "LambdaPower"}
+
+
+def test_platform_creates_when_nothing_exists(env_config: EnvConfig, fake: FakeAws) -> None:
+    action = _by_target(build_plan(env_config, fake.aws))[PLATFORM_TARGET]
+    assert action.kind is ActionKind.CREATE
+    assert action.imports == ()
+
+
+def test_replacing_a_user_pool_is_blocked(env_config: EnvConfig, fake: FakeAws) -> None:
+    _all_stacks_exist(fake, env_config)
+    fake.stacks.previews["rc-platform"] = [
+        ResourceChange("Modify", "ProdUserPool", "AWS::Cognito::UserPool", replacement="True"),
+    ]
+
+    plan = build_plan(env_config, fake.aws)
+    action = _by_target(plan)[PLATFORM_TARGET]
+
+    assert action.kind is ActionKind.BLOCKED
+    assert any("ProdUserPool" in detail for detail in action.details)
+    # The platform is shared, so this must stop the whole apply rather than skip.
+    assert plan.halting == [action]
+
+
+def test_removing_a_user_pool_is_blocked(env_config: EnvConfig, fake: FakeAws) -> None:
+    _all_stacks_exist(fake, env_config)
+    fake.stacks.previews["rc-platform"] = [ResourceChange("Remove", "DevUserPoolDomain", "AWS::Cognito::UserPoolDomain")]
+
+    assert _by_target(build_plan(env_config, fake.aws))[PLATFORM_TARGET].kind is ActionKind.BLOCKED
+
+
+def test_in_place_identity_changes_are_allowed(env_config: EnvConfig, fake: FakeAws) -> None:
+    _all_stacks_exist(fake, env_config)
+    fake.stacks.previews["rc-platform"] = [
+        ResourceChange("Modify", "ProdUserPoolClient", "AWS::Cognito::UserPoolClient", replacement="False"),
+    ]
+
+    assert _by_target(build_plan(env_config, fake.aws))[PLATFORM_TARGET].kind is ActionKind.UPDATE
+
+
+def test_a_blocked_preview_does_not_halt_the_plan(env_config: EnvConfig, fake: FakeAws) -> None:
+    name = bucket_name("preview1", "avatars")
+    fake.buckets.live[name] = matching_live_config("avatars")
+    fake.buckets.owners[name] = "rc-preview1"
+
+    plan = build_plan(env_config, fake.aws)
+
+    assert _by_target(plan)["preview1"].kind is ActionKind.BLOCKED
+    assert plan.halting == []
+    assert "skipped" in render_text(plan)

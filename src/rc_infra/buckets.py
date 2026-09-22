@@ -3,13 +3,16 @@
 A CloudFormation import records the template's properties as the bucket's state
 without applying them. If they differ from the live bucket, a later update would
 silently reconfigure a bucket holding production data. rc-infra therefore imports a
-bucket only when its live configuration matches the template exactly, for every
-property group the template declares or that would otherwise be reset.
+bucket only when its live configuration matches the template, for every property
+group the template declares or that would otherwise be reset.
+
+One group is advisory rather than blocking: see ADVISORY_PROPERTIES.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from botocore.exceptions import ClientError
@@ -30,6 +33,17 @@ COMPARED_PROPERTIES = frozenset(
         "CorsConfiguration",
     }
 )
+
+# CORS differences do not block an import. The live rules are not uniform -- some
+# buckets predate the current rule -- and a CORS rule grants no access by itself, so
+# converging them on the template is the intended outcome rather than a hazard.
+# Everything else stays blocking: encryption and public-access-block are security
+# settings, and versioning and lifecycle decide whether data survives.
+#
+# Note this defers the change rather than avoiding it. After the import, the next
+# update applies the template, so the template must already declare the shape these
+# buckets should converge on.
+ADVISORY_PROPERTIES = frozenset({"cors"})
 
 _MISSING_CONFIGURATION_ERRORS = frozenset(
     {
@@ -90,15 +104,32 @@ class S3Buckets:
             raise
 
 
-def config_diff(template_properties: Mapping[str, Any], live: Mapping[str, Any]) -> list[str]:
-    """Human-readable differences between a template's bucket properties and a live bucket."""
+@dataclass(frozen=True)
+class Difference:
+    """One property group where a live bucket and the template disagree."""
+
+    group: str
+    message: str
+    blocking: bool
+
+
+def config_diff(template_properties: Mapping[str, Any], live: Mapping[str, Any]) -> list[Difference]:
+    """Differences between a template's bucket properties and a live bucket."""
     unsupported = sorted(set(template_properties) - COMPARED_PROPERTIES)
     if unsupported:
         raise ValueError(f"cannot compare bucket properties {unsupported}; extend buckets.py")
 
     expected = normalize_template(template_properties)
     actual = normalize_live(live)
-    return [f"{group}: template={expected[group]!r} live={actual[group]!r}" for group in sorted(expected) if expected[group] != actual[group]]
+    return [
+        Difference(
+            group=group,
+            message=f"{group}: template={expected[group]!r} live={actual[group]!r}",
+            blocking=group not in ADVISORY_PROPERTIES,
+        )
+        for group in sorted(expected)
+        if expected[group] != actual[group]
+    ]
 
 
 def normalize_template(properties: Mapping[str, Any]) -> dict[str, Any]:

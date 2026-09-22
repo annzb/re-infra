@@ -55,3 +55,29 @@ ARN here must be updated to match, and that is the only coupling.
 
 Note that the `preview` pool's triggers point at `rc-preview1-*`. All ten preview
 environments share that pool, so they all run preview1's trigger functions.
+
+## Who owns the trigger Lambdas
+
+Each pool's `LambdaConfig` is declared here, in `platform.yaml`, naming the functions by ARN:
+
+| Owned by re-infra | Owned by `retribalize-core` |
+|---|---|
+| The user pools, clients and domains | The trigger Lambda functions and their `live` aliases |
+| Each pool's complete `LambdaConfig` | The `AWS::Lambda::Permission` letting Cognito invoke them |
+
+**The contract between the repositories is the function and alias names** —
+`rc-<slot>-post-signup:live` and `rc-<slot>-user-migration`. Renaming either in core is a breaking
+change that must be mirrored here in the same change.
+
+`AWS::Lambda::Permission` belongs in core because it edits the *function's* resource policy, not the
+pool: it is a property of the thing being invoked, so it lives with the thing being invoked.
+
+`LambdaConfig` is deliberately kept here rather than being set by core after deployment. Cognito's
+`UpdateUserPool` rewrites the whole pool, so a template that omitted `LambdaConfig` would silently
+clear the triggers the next time any other pool property changed. Keeping it in the template means
+the template is the source of truth and there is nothing to clear.
+
+One ordering consequence: adding a **new** identity profile requires its trigger functions to exist
+before the pool is written, because Cognito validates the ARNs. Existing profiles are unaffected —
+their functions are already deployed. Note that the `preview` pool's triggers point at
+`rc-preview1-*`, so every preview slot runs preview1's trigger functions.

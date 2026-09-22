@@ -13,12 +13,17 @@ Description: >
 #     That is what the two suppressed cfn-lint warnings are about -- W1100/W1101
 #     assume the raw file is handed to `aws cloudformation deploy`, which it is not.
 #
-# THIS STACK IS CREATED BY IMPORT, NOT BY CREATE. Fifteen of the sixteen resources
-# below already existed before this repository did; only rc-lambda-base is new. A
-# CREATE would try to remake them and fail -- hosted UI domain prefixes are globally
-# unique, and the role and repository names are taken -- and because everything here
-# is Retain, the rollback can leave duplicate Cognito pools behind. See README
-# section 8 for the one-time adoption procedure.
+# THIS STACK IS CREATED BY IMPORT, NOT BY CREATE. The Cognito resources and the
+# LambdaPower role already existed before this repository did, and a CREATE would try
+# to remake them and fail -- hosted UI domain prefixes are globally unique and the
+# role name is taken -- leaving duplicate pools behind, because everything here is
+# Retain. rc-infra plans this itself: `_plan_platform` adopts whatever already exists
+# and creates only the rest, so the first apply is an IMPORT followed by an UPDATE.
+#
+# The three image repositories are new. rc-api-v2 and rc-matching-v2 are deliberately
+# NOT the rc-api and rc-matching that retribalize-core's rc-ecr stack owns: a resource
+# cannot belong to two stacks, and renaming is cheaper than migrating. The old
+# repositories keep serving every deployed Lambda until core is repointed.
 
 Metadata:
   cfn-lint:
@@ -83,7 +88,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      RepositoryName: rc-api
+      RepositoryName: rc-api-v2
       ImageTagMutability: MUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -102,13 +107,13 @@ Resources:
 
   # The one image every matching Lambda shares, deployed by digest through
   # retribalize-core's MatchingImageUri parameter. No lifecycle policy, for the
-  # same reason as rc-api.
+  # same reason as rc-api-v2.
   MatchingImageRepository:
     Type: AWS::ECR::Repository
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      RepositoryName: rc-matching
+      RepositoryName: rc-matching-v2
       ImageTagMutability: MUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true

@@ -85,7 +85,7 @@ A called workflow must never declare the same concurrency group as its caller: G
 
 | Stack/resource | Owner | Contents |
 |---|---|---|
-| `rc-platform` | This repo | The shared ECR repositories, the four Cognito identity pools, and the shared `LambdaPower` Lambda execution role. |
+| `rc-platform` | This repo | The shared image repositories (`rc-lambda-base`, `rc-api-v2`, `rc-matching-v2`), the four Cognito identity pools with their clients and domains, and the shared `LambdaPower` Lambda execution role. |
 | `rc-env-<name>` | This repo | The environment's durable buckets. |
 | `rc-app-<name>` | `retribalize-core` | Application-specific SAM/CloudFormation resources. |
 | DynamoDB application tables | `rc-dynamo-sync` from `retribalize-core` | Application table schemas and migrations; not owned by these CloudFormation templates. |
@@ -154,7 +154,7 @@ For `preview3` in account `273268178059`:
 | Core stack | `rc-env-preview3` |
 | Application stack | `rc-app-preview3` |
 | DynamoDB table prefix | `rc-preview3-` |
-| Buckets | `rc-preview3-{embeddings,user-corpus,avatars,recordings,schema-dumps}-273268178059` |
+| Buckets | `rc-preview3-{embeddings,user-corpus,avatars,recordings,schema-dumps,property-registry}-273268178059` |
 
 These names are derived, not published. An earlier version of the environment stack mirrored them into `/rc/env/<name>/*` SSM parameters as the contract with `retribalize-core`; those parameters have been removed and the contract is being expressed another way. Derive the names from the environment's name as above, or read them from the stack.
 
@@ -188,7 +188,11 @@ The command:
 
 Without `--yes` it stops there: a dry run that modifies nothing. Building the plan is not literally API read-only — CloudFormation previews require temporary `CreateChangeSet` and `DeleteChangeSet` calls — but it never executes a change set.
 
-With `--yes`, it refuses any plan containing `BLOCKED`, then applies creates/imports/updates before deletions. Failures in one environment are recorded without preventing independent environments from being attempted; any failure produces a nonzero exit code.
+With `--yes`, it applies creates/imports/updates before deletions. Failures in one environment are recorded without preventing independent environments from being attempted; any failure produces a nonzero exit code.
+
+A `BLOCKED` action stops the whole apply only when it targets `rc-platform` or a protected environment (`prod`, `staging`, `dev`) — those are shared foundations, and applying anything on top of one nobody has looked at is not worth the speed. A blocked preview is skipped, counted as a failure, and everything else still applies. The plan output says which kind each one is.
+
+Two things are refused outright and cannot be applied at all: a change that would **replace or remove** a Cognito user pool, client or domain, or the `LambdaPower` role. There is no override flag. Replacing a pool creates an empty one and strands every account behind its `Retain` policy, and `main.yml` applies unattended, so this is not left to a reviewer to catch. If such a change is genuinely intended, make it by hand.
 
 Routine applies belong in the protected main-branch workflow, not on developer machines.
 
@@ -294,6 +298,9 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
 `retribalize-core` should:
 
 - refuse to deploy when the target `rc-env-<name>` stack does not exist;
+- resolve its API and matching images from `rc-api-v2` and `rc-matching-v2`, not the `rc-ecr` stack's `rc-api` and `rc-matching`, and push to them before the first deploy that reads a digest from them;
+- read each preview slot's buckets as `rc-preview<N>-*`, which is what `envs.yaml` declares and this repo creates, rather than the shared `rc-preview-*` set;
+- own the Cognito trigger functions, their `live` aliases, and the `AWS::Lambda::Permission` that lets Cognito invoke them, keeping the function and alias *names* stable — those names are the contract, and `infra/platform.yaml` names them in each pool's `LambdaConfig`;
 - build service images from the immutable digest of `rc-lambda-base:main`, resolved from ECR rather than from a branch tag, and record that digest in its build manifest, refreshing it within 30 days of being superseded;
 - export `TABLES: Mapping[str, BaseTable]` from its schema module and invoke `rc-dynamo-sync --schema-module <module> --environment <name> --apply`;
 - own all `rc-app-<name>` application stacks and service releases.
@@ -308,47 +315,34 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
 
 2. Put the role's ARN in `AWS_ROLE_GITHUB` and add `AWS_REGION=us-east-1`.
 3. Protect `main`: require CODEOWNERS review and the checks from `non-main.yml`, which is what runs on a pull request's source branch. A called workflow reports its checks as `<calling job> / <called job>`, so the validation check is named `validate / Lint, test, validate`. The image check is named `deploy-images / Build, test, and publish`. Jobs that exist only in `main.yml`, such as `deploy-infra`, can never be required checks. Block force pushes and branch deletion.
-4. Create `rc-platform` by **importing**, never by creating. Fifteen of its sixteen resources already exist and hold live state: the four Cognito pools (the prod one had 7,039 user accounts), their app clients and hosted UI domains, the `rc-api` and `rc-matching` image repositories, and the `LambdaPower` role. Only `rc-lambda-base` is new.
-
-   > **Do not run `rc-infra apply --yes` against a non-existent `rc-platform`.** It plans a `CREATE`, and a create would try to make resources that already exist: the hosted UI domain prefixes are globally unique and the role and repository names are taken, so the stack fails and rolls back, and because every resource is `Retain` the rollback can leave duplicate Cognito pools behind. Import first; after that the plan is an ordinary `UPDATE`.
-
-   First, release `rc-api` and `rc-matching` from the `rc-ecr` stack in `retribalize-core` — a resource cannot belong to two stacks. Remove them from its `infra/ecr.yaml` while keeping `DeletionPolicy: Retain` so the repositories and their images survive, and deploy that stack. The images are deployed by digest, so nothing needs rebuilding.
-
-   Then create `rc-platform` from the existing resources. A create-by-import change set may contain **only** the resources being imported, so `rc-lambda-base` is added by the ordinary apply that follows:
+4. Run the first apply by hand and watch it. `rc-infra` adopts rather than recreates: the four
+   Cognito pools (the prod one holds over 7,000 accounts), their clients and hosted UI domains, and
+   the `LambdaPower` role all predate this repository, so the planner checks what exists and plans
+   an `IMPORT` for `rc-platform` followed by an update that adds the three image repositories. The
+   same happens per environment for buckets that already exist. Nothing here needs a hand-written
+   change set, but the first run is still worth doing locally rather than leaving to `main`:
 
    ```bash
-   # Identifiers: pool/client IDs and domains are in envs.yaml under identity_profiles.
-   aws cloudformation create-change-set \
-     --stack-name rc-platform \
-     --change-set-name adopt \
-     --change-set-type IMPORT \
-     --capabilities CAPABILITY_NAMED_IAM \
-     --template-body file://<template-without-rc-lambda-base> \
-     --resources-to-import file://resources-to-import.json
+   AWS_PROFILE=<profile> uv run rc-infra apply          # read the plan
+   AWS_PROFILE=<profile> uv run rc-infra apply --yes    # then carry it out
    ```
 
-   Each entry names a logical ID from `infra/platform.yaml` and its identifier, for example:
+   Before applying, check the plan says `IMPORT platform` and lists all four pools, all four clients,
+   all four domains and `LambdaPowerRole` — thirteen resources. If it says `CREATE platform`, stop:
+   the existence checks did not see the live pools, and a create would try to build a second set,
+   fail on the globally-unique domain prefixes, and leave duplicates behind because everything is
+   `Retain`. A plan that would replace a Cognito resource or the role is refused outright and cannot
+   be applied at all.
 
-   ```json
-   {"ResourceType":"AWS::Cognito::UserPool","LogicalResourceId":"ProdUserPool",
-    "ResourceIdentifier":{"UserPoolId":"us-east-1_1GIFBpLKf"}}
-   {"ResourceType":"AWS::ECR::Repository","LogicalResourceId":"ApiImageRepository",
-    "ResourceIdentifier":{"RepositoryName":"rc-api"}}
-   ```
-
-   Client entries also carry `ClientId`, domain entries `Domain`, and the role entry `RoleName`.
-
-   **Read the change set before executing it.** Every resource must report `Import`, and none may report a replacement. Then confirm nothing moved and that `rc-infra` agrees the template matches:
+   Afterwards, confirm the pools are untouched:
 
    ```bash
    aws cognito-idp describe-user-pool --user-pool-id us-east-1_1GIFBpLKf \
      --query 'UserPool.EstimatedNumberOfUsers'
-   uv run rc-infra apply     # rc-platform: UPDATE adding only rc-lambda-base
+   uv run rc-infra apply     # rc-platform should now be NOOP
    ```
 
-   That apply must add `rc-lambda-base` and touch nothing else. If it proposes changing or replacing a pool, a client, a domain or the role, the template does not match what was imported — fix the template, and never apply it.
-
-5. Before the first main apply, run `rc-infra apply` without `--yes` using authorized local credentials. Existing buckets should appear as `IMPORT`. If an import is `BLOCKED`, modify the template to match the live bucket before applying; do not modify production data merely to satisfy the template.
+5. Expect `preview2` to be `BLOCKED` until `retribalize-core` releases `rc-preview2-avatars` from its application stack: CloudFormation will not import a resource another stack owns. A blocked preview is skipped and the rest of the plan still applies, so this does not hold up the pipeline. A blocked `prod`, `staging`, `dev` or `platform` does stop everything, deliberately.
 
 ## 9. Troubleshooting
 

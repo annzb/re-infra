@@ -47,7 +47,7 @@ jobs:
         id: buildx
 
       # set up build cache
-      - uses: crazy-max/ghaction-github-runtime@v3
+      - uses: crazy-max/ghaction-github-runtime@v4
 
       # name image after current branch
       - name: Resolve the image name

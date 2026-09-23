@@ -11,7 +11,7 @@
 # against exactly the bits that get pushed. Building this file on its own therefore needs
 # that context: docker build --build-context rc_dynamo_base=docker-image://<ref> ...
 
-FROM ghcr.io/astral-sh/uv:0.12.15 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.18 AS uv
 
 FROM rc_dynamo_base
 

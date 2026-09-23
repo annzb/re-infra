@@ -7,7 +7,7 @@
 # image. The test image is built on top of this one - see tests.Dockerfile.
 
 FROM public.ecr.aws/datadog/lambda-extension:98 AS datadog
-FROM ghcr.io/astral-sh/uv:0.12.15 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.18 AS uv
 
 # Multi-arch index digest of public.ecr.aws/lambda/python:3.11; build with
 # --platform linux/amd64. Bump through Dependabot or by re-resolving:

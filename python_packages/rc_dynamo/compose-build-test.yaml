@@ -17,10 +17,11 @@
 # no override: importing a gha cache without an Actions token is a silent no-op.
 name: rc-dynamo-build-test
 
-# The name the published image is pushed under. CI exports ECR_REGISTRY and IMAGE_TAG
-# from deploy-images.yml; the defaults are what a laptop gets. Only "base" needs it - the test
-# image is wired to that build directly and never resolves a name.
-x-image-ref: &image-ref ${ECR_REGISTRY:-273268178059.dkr.ecr.us-east-1.amazonaws.com}/rc-lambda-base:${IMAGE_TAG:-latest}
+# The name the published image is pushed under. CI exports IMAGE_REPOSITORY (the rc-platform
+# stack's LambdaBaseImageRepositoryUri output) and IMAGE_TAG from deploy-images.yml; the
+# defaults are what a laptop gets. Only "base" needs it - the test image is wired to that
+# build directly and never resolves a name.
+x-image-ref: &image-ref ${IMAGE_REPOSITORY:-273268178059.dkr.ecr.us-east-1.amazonaws.com/rc-lambda-base}:${IMAGE_TAG:-latest}
 
 services:
   # The published Lambda parent image. It exists to be built, never started: it is a

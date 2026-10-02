@@ -51,15 +51,20 @@ jobs:
 
       # name image after current branch, and record where it came from
       - name: Resolve the image name and provenance
-        env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
+          # the repository is an rc-platform output, never a name built here
+          repository=$(aws cloudformation describe-stacks --stack-name rc-platform \
+            --query "Stacks[0].Outputs[?OutputKey=='LambdaBaseImageRepositoryUri'].OutputValue" --output text) || repository=""
+          if [ -z "$repository" ] || [ "$repository" = "None" ]; then
+            echo "::error::rc-platform has no LambdaBaseImageRepositoryUri output; a push to main must deploy infrastructure first"
+            exit 1
+          fi
           tag=$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-128)
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           {
-            echo "ECR_REGISTRY=$REGISTRY"
+            echo "IMAGE_REPOSITORY=$repository"
             echo "IMAGE_TAG=$tag"
-            echo "IMAGE=${REGISTRY}/rc-lambda-base:${tag}"
+            echo "IMAGE=${repository}:${tag}"
             echo "SOURCE_REPOSITORY=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             echo "REVISION=$GITHUB_SHA"
             echo "VERSION=$version"

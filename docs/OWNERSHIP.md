@@ -85,16 +85,26 @@ Line numbers are approximate and point into `backend/template-v2.yaml` unless an
 4. **Update** the identity providers on the live v2 pools to use the new secrets until those pools retire.
 5. **Consider a history scrub** (`git filter-repo`, then a force-push and fresh clones). Rotation is what actually closes the exposure. A scrub only removes the old values from history.
 
+## Decisions
+
+- **D1: every slot is its own persistence lineage.** Each `envs.yaml` entry gets its own `rc-env-<slot>` stack with its own six buckets, and its own `rc-<slot>-*` tables. No durable resource is shared between slots; only identity is shared, through identity profiles (all previews use `preview`).
+- **D3: DynamoDB tables stay in core.** `rc_dynamo` schema sync creates and migrates `rc-<slot>-*` tables from core's table models. `re-infra` declares no tables; it only reports on and tears down tables tagged `ManagedBy=rc-dynamo-sync`.
+- **D4: fresh physical names, read from outputs.** Buckets and the shared role have CloudFormation-generated names. ECR repositories (`rc-lambda-base`, `rc-api-v2`, `rc-matching-v2`) and Cognito pools/domains (`-v3`) have fixed names that no earlier generation uses. Every consumer reads identifiers from `rc-infra outputs` or the stack outputs, never from a naming convention.
+
 ## Open decisions
 
 - **D2: Cognito user migration.** The v3 pools are new and empty, and prod v2 has about 7k users. The options are a forced password reset, or a first-login `UserMigration` trigger that authenticates against the v2 pool. A trigger lets most users carry over without noticing; a reset is simpler. Either way, `SignupFanoutFunction`/`FANOUT_TARGETS` (cross-pool replication) must be reconsidered.
-- **D3: DynamoDB tables stay in core** (rc_dynamo schema sync). Needs confirmation. Under per-slot isolation, preview1-8 get their own tables: today they all share `rc-preview-*` (`resolve_environment_config.py` ~11).
 - **D5: identity providers in CloudFormation.** Declare `UserPoolIdentityProvider` with `{{resolve:secretsmanager:...}}` for `client_secret`, after the rotation above. Until then the v3 clients support only `COGNITO`, so social login is a regression on cutover.
 - **D6: base package distribution.** How core consumes `rc_dynamo` and the `rc-lambda-base` image (registry package vs. image parent vs. vendoring), and which tag core pins.
 - **Trigger wiring.** The v3 pools have no `LambdaConfig`. Someone must decide which slot's `post-signup:live`/`user-migration` functions back the shared preview pool. It is preview1 today. The wiring has to be in the template, because `UpdateUserPool` would otherwise clear it.
-- **Inconsistencies between core config and per-slot isolation:**
-  - `preview67` and `preview89` have their own tables and property-registry bucket but share `rc-preview-{embeddings,user-corpus,avatars,recordings}` (~264-269, ~302-307). preview1-8 share everything `rc-preview-*`. re-infra gives every slot its own six buckets.
-  - `deployment-environments.json` uses `slot_pattern ^preview[1-8]$` plus separate preview67/89 entries, and `IsPreview` (~109) hardcodes preview67/89. `envs.yaml` lists all ten slots directly.
-  - preview67's mapped `FrontendUrl` is preview1's (~281). The `IsPreview` condition overrides it, but the mapping value is wrong.
-  - Avatar URLs stored in DynamoDB embed the bucket name (`migrate-avatars-to-s3.py` ~123). Moving to generated bucket names needs a data rewrite or a redirect, not just a copy.
-  - `MatchingContributionsS3Permission` and `setup_corpus_triggers.py` assume the shared corpus bucket. Notifications from several slots merge onto one bucket today.
+
+## Core follow-ups under per-slot isolation
+
+Core still assumes the shared tiers. Each of these changes in core when it moves onto the output contract:
+
+- `preview67` and `preview89` have their own tables and property-registry bucket but share `rc-preview-{embeddings,user-corpus,avatars,recordings}` (~264-269, ~302-307). preview1-8 share everything `rc-preview-*`. re-infra gives every slot its own six buckets.
+- preview1-8 share `rc-preview-*` tables (`resolve_environment_config.py` ~11). Schema sync must create `rc-<slot>-*` tables per slot instead.
+- `deployment-environments.json` uses `slot_pattern ^preview[1-8]$` plus separate preview67/89 entries, and `IsPreview` (~109) hardcodes preview67/89. `envs.yaml` lists all ten slots directly.
+- preview67's mapped `FrontendUrl` is preview1's (~281). The `IsPreview` condition overrides it, but the mapping value is wrong.
+- Avatar URLs stored in DynamoDB embed the bucket name (`migrate-avatars-to-s3.py` ~123). Moving to generated bucket names needs a data rewrite or a redirect, not just a copy.
+- `MatchingContributionsS3Permission` and `setup_corpus_triggers.py` assume the shared corpus bucket. Notifications from several slots merge onto one bucket today.

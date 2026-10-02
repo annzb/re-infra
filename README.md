@@ -53,7 +53,7 @@ A push is the only trigger, and exactly one entry point runs: [`main.yml`](.gith
 ### Every branch except main — `non-main.yml`
 
 1. **Validate** ([`validate.yml`](.github/workflows/validate.yml)) checks the lockfile (`uv lock --check`), installs the root project from it, runs Ruff, mypy, and pytest, runs `cfn-lint` on `infra/*.yaml`, and runs `rc-infra validate` on `envs.yaml`.
-2. **Deploy images** ([`deploy-images.yml`](.github/workflows/deploy-images.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-build-test.yaml`](python_packages/rc_dynamo/compose-build-test.yaml), and pushes it to `rc-lambda-base:<branch>`.
+2. **Deploy images** ([`deploy-images.yml`](.github/workflows/deploy-images.yml)) starts after validation. In a single job it builds the image, runs the `rc_dynamo` test pipeline against it through [`compose-build-test.yaml`](python_packages/rc_dynamo/compose-build-test.yaml), and pushes it to `rc-lambda-base:<branch>`. The repository URI is read from the `rc-platform` stack's `LambdaBaseImageRepositoryUri` output, so a branch fails at that step until `main` has deployed `rc-platform` once.
 
 A branch run reaches AWS only to push its own image tag; it never deploys infrastructure, and a branch deletion is skipped rather than rebuilt. To see what a change would do to live infrastructure, run a local dry run (section 3).
 
@@ -104,6 +104,8 @@ This repository does not deploy application code. A successfully created `rc-env
 [`envs.yaml`](envs.yaml) is the complete desired list of environments. Because `main` is authoritative, adding an entry creates infrastructure and removing an entry tears that environment down when the change reaches `main`.
 
 > **Warning:** removing an environment deletes its `rc-app-<name>` stack, schema-sync-managed tables, buckets and bucket data, followed by its `rc-env-<name>` stack. `prod`, `staging`, and `dev` are protected from removal by validation, termination protection, and explicit IAM denies.
+
+Every entry is its own persistence lineage: its own `rc-env-<name>` stack and six buckets, and its own `rc-<name>-*` tables once schema sync creates them. Environments share nothing durable; only an identity profile can be shared (all previews use `preview` by default). See [docs/OWNERSHIP.md](docs/OWNERSHIP.md#decisions).
 
 Never commit secrets to `envs.yaml`, nor identifiers AWS generates: those are read back from stack outputs. API keys, tokens, and client secrets belong in Secrets Manager.
 

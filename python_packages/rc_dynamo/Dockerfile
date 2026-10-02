@@ -6,7 +6,7 @@
 # rc_dynamo are installed: tests, uv, and build tooling never reach the final
 # image. The test image is built on top of this one - see tests.Dockerfile.
 
-FROM public.ecr.aws/datadog/lambda-extension:98 AS datadog
+FROM public.ecr.aws/datadog/lambda-extension:100 AS datadog
 FROM ghcr.io/astral-sh/uv:0.12.15 AS uv
 
 # Multi-arch index digest of public.ecr.aws/lambda/python:3.11; build with

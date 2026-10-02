@@ -33,6 +33,12 @@ services:
       dockerfile: Dockerfile
       platforms:
         - linux/amd64
+      # Provenance, exported by deploy-images.yml; empty on a laptop.
+      args:
+        SOURCE_REPOSITORY: ${SOURCE_REPOSITORY:-}
+        REVISION: ${REVISION:-}
+        VERSION: ${VERSION:-}
+        CREATED: ${CREATED:-}
       cache_from: ["${BUILD_CACHE_FROM:-type=gha,scope=rc-dynamo-base}"]
       cache_to: ["${BUILD_CACHE_TO:-type=gha,mode=max,scope=rc-dynamo-base}"]
 

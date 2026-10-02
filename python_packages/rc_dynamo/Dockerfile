@@ -50,11 +50,39 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
 
 WORKDIR ${LAMBDA_TASK_ROOT}
 
-# Last, so per-build values never invalidate the layers above.
+# Last, so per-build values never invalidate the layers above. deploy-images.yml
+# supplies them; a laptop build leaves them empty.
 ARG SOURCE_REPOSITORY=""
+ARG REVISION=""
+ARG VERSION=""
 ARG CREATED=""
 LABEL org.opencontainers.image.title="rc-dynamo" \
       org.opencontainers.image.description="Retribalize Lambda parent image with the rc_dynamo DynamoDB framework" \
       org.opencontainers.image.source="${SOURCE_REPOSITORY}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.created="${CREATED}" \
       ai.retribalize.python.version="3.11"
+
+# Machine-readable provenance for child images and their CI: which re-infra commit
+# built this image and which package versions it carries. Fails the build if the
+# declared VERSION disagrees with what was actually installed.
+RUN /var/lang/bin/python3.11 - <<'PY'
+import importlib.metadata
+import json
+import os
+import platform
+
+installed = importlib.metadata.version("rc-dynamo")
+declared = os.environ.get("VERSION") or installed
+if declared != installed:
+    raise SystemExit(f"VERSION={declared} but rc-dynamo {installed} is installed")
+runtime = {
+    "re_infra_revision": os.environ.get("REVISION") or None,
+    "created": os.environ.get("CREATED") or None,
+    "python": platform.python_version(),
+    "packages": {"rc-dynamo": installed},
+}
+with open("/opt/rc-runtime.json", "w") as handle:
+    json.dump(runtime, handle, indent=2)
+PY

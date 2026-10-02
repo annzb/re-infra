@@ -32,7 +32,6 @@ def test_derived_names(env_config: Any) -> None:
     assert env.core_stack == "rc-env-preview67"
     assert env.app_stack == "rc-app-preview67"
     assert env.table_prefix == "rc-preview67-"
-    assert env.buckets["user-corpus"] == "rc-preview67-user-corpus-273268178059"
     assert not env.protected
     assert env_config.get("prod").protected
 
@@ -40,7 +39,17 @@ def test_derived_names(env_config: Any) -> None:
 def test_identity_defaults_to_same_named_profile_then_preview(env_config: Any) -> None:
     assert env_config.get("staging").identity_profile == "staging"
     assert env_config.get("preview3").identity_profile == "preview"
-    assert env_config.get("preview3").identity.user_pool_id == "us-east-1_LwH5lWQ0q"
+
+
+def test_identity_profiles_hold_no_aws_ids(raw_config: dict[str, Any]) -> None:
+    """Pool and client IDs are stack outputs, never desired state."""
+    raw_config["identity_profiles"]["prod"] = {"user_pool_id": "us-east-1_abc"}
+    assert any(e.startswith("identity_profiles.prod.user_pool_id:") for e in _errors(raw_config))
+
+
+def test_empty_profile_entry_means_defaults(raw_config: dict[str, Any]) -> None:
+    raw_config["identity_profiles"]["preview"] = None
+    assert parse_env_config(raw_config).get("preview3").identity_profile == "preview"
 
 
 def test_explicit_identity(raw_config: dict[str, Any]) -> None:
@@ -110,10 +119,12 @@ def test_rendering_is_deterministic(raw_config: dict[str, Any]) -> None:
     assert parse_env_config(shuffled).to_json() == parse_env_config(raw_config).to_json()
 
 
-def test_longest_name_fits_bucket_limit(raw_config: dict[str, Any]) -> None:
+def test_longest_stack_prefix_leaves_room_for_generated_bucket_names(raw_config: dict[str, Any]) -> None:
     raw_config["environments"]["a" * 20] = {}
     env = parse_env_config(raw_config).get("a" * 20)
-    assert max(len(name) for name in env.buckets.values()) <= 63
+    # CloudFormation appends "-<logical id>-<12-character suffix>" and truncates the
+    # logical id to fit 63 characters; the stack prefix itself must stay intact.
+    assert len(f"{env.core_stack}-") + len("-a1b2c3d4e5f6") + 8 <= 63
 
 
 @pytest.mark.parametrize(

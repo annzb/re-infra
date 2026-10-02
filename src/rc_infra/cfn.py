@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from botocore.exceptions import ClientError, WaiterError
@@ -17,13 +17,11 @@ _NO_CHANGES_REASONS = ("didn't contain changes", "No updates are to be performed
 _WAITERS = {
     ChangeSetKind.CREATE: "stack_create_complete",
     ChangeSetKind.UPDATE: "stack_update_complete",
-    ChangeSetKind.IMPORT: "stack_import_complete",
 }
 # Stack operations on these templates take minutes; allow up to an hour.
 _WAITER_CONFIG: Any = {"Delay": 10, "MaxAttempts": 360}
-# rc-platform declares the shared Lambda execution role by name, so every change
-# set must acknowledge named IAM resources or CloudFormation refuses to create it.
-_CAPABILITIES = ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"]
+# rc-platform declares the shared Lambda execution role (with a generated name).
+_CAPABILITIES = ["CAPABILITY_IAM"]
 
 
 class DeployError(Exception):
@@ -66,10 +64,9 @@ class CloudFormationStacks:
         self,
         stack_name: str,
         template_body: str,
-        parameters: Mapping[str, str],
         tags: Mapping[str, str],
     ) -> list[ResourceChange]:
-        change_set_id, changes = self._create_change_set(stack_name, ChangeSetKind.UPDATE, template_body, parameters, tags, ())
+        change_set_id, changes = self._create_change_set(stack_name, ChangeSetKind.UPDATE, template_body, tags)
         if change_set_id:
             self._cfn.delete_change_set(ChangeSetName=change_set_id)
         return changes
@@ -79,11 +76,9 @@ class CloudFormationStacks:
         stack_name: str,
         kind: ChangeSetKind,
         template_body: str,
-        parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        resources_to_import: Sequence[Mapping[str, Any]] = (),
     ) -> list[ResourceChange]:
-        change_set_id, changes = self._create_change_set(stack_name, kind, template_body, parameters, tags, resources_to_import)
+        change_set_id, changes = self._create_change_set(stack_name, kind, template_body, tags)
         if not change_set_id:
             return []
         self._cfn.execute_change_set(ChangeSetName=change_set_id)
@@ -112,21 +107,16 @@ class CloudFormationStacks:
         stack_name: str,
         kind: ChangeSetKind,
         template_body: str,
-        parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        resources_to_import: Sequence[Mapping[str, Any]],
     ) -> tuple[str | None, list[ResourceChange]]:
         kwargs: dict[str, Any] = {
             "StackName": stack_name,
             "ChangeSetName": f"rc-infra-{uuid.uuid4().hex[:12]}",
             "ChangeSetType": kind.value,
             "TemplateBody": template_body,
-            "Parameters": [{"ParameterKey": key, "ParameterValue": value} for key, value in parameters.items()],
             "Tags": [{"Key": key, "Value": value} for key, value in tags.items()],
             "Capabilities": _CAPABILITIES,
         }
-        if resources_to_import:
-            kwargs["ResourcesToImport"] = list(resources_to_import)
 
         change_set_id = self._cfn.create_change_set(**kwargs)["Id"]
         try:
@@ -179,4 +169,5 @@ def _stack(raw: Mapping[str, Any]) -> Stack:
         status=raw["StackStatus"],
         tags={tag["Key"]: tag["Value"] for tag in raw.get("Tags", [])},
         termination_protection=bool(raw.get("EnableTerminationProtection", False)),
+        outputs={output["OutputKey"]: output["OutputValue"] for output in raw.get("Outputs", [])},
     )

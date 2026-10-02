@@ -6,7 +6,7 @@ ordering across stacks, tables, and buckets.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -47,7 +47,6 @@ class FakeStacks:
         self,
         stack_name: str,
         template_body: str,
-        parameters: Mapping[str, str],
         tags: Mapping[str, str],
     ) -> list[ResourceChange]:
         return list(self.previews.get(stack_name, []))
@@ -57,9 +56,7 @@ class FakeStacks:
         stack_name: str,
         kind: ChangeSetKind,
         template_body: str,
-        parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        resources_to_import: Sequence[Mapping[str, Any]] = (),
     ) -> list[ResourceChange]:
         self.events.append(("deploy", kind.value, stack_name))
         self.deploys.append(
@@ -67,9 +64,7 @@ class FakeStacks:
                 "stack": stack_name,
                 "kind": kind,
                 "template_body": template_body,
-                "parameters": dict(parameters),
                 "tags": dict(tags),
-                "resources_to_import": list(resources_to_import),
             }
         )
         if stack_name in self.fail_deploy:
@@ -97,18 +92,16 @@ class FakeStacks:
 @dataclass
 class FakeBuckets:
     events: list[tuple[Any, ...]]
-    live: dict[str, dict[str, Any]] = field(default_factory=dict)
-    owners: dict[str, str] = field(default_factory=dict)
+    # Bucket name -> current object count. Versions holds noncurrent versions only.
+    live: dict[str, int] = field(default_factory=dict)
+    versions: dict[str, int] = field(default_factory=dict)
     fail_delete_once: set[str] = field(default_factory=set)
 
     def exists(self, name: str) -> bool:
         return name in self.live
 
-    def owner_stack(self, name: str) -> str | None:
-        return self.owners.get(name)
-
-    def live_config(self, name: str) -> dict[str, Any]:
-        return self.live[name]
+    def is_empty(self, name: str, include_versions: bool = False) -> bool:
+        return self.live[name] == 0 and not (include_versions and self.versions.get(name))
 
     def empty_and_delete(self, name: str) -> None:
         if name in self.fail_delete_once:
@@ -124,6 +117,7 @@ class FakeBuckets:
 class FakeTables:
     events: list[tuple[Any, ...]]
     table_tags: dict[str, dict[str, str]] = field(default_factory=dict)
+    items: dict[str, int] = field(default_factory=dict)
 
     def list_names(self, prefix: str) -> list[str]:
         return sorted(name for name in self.table_tags if name.startswith(prefix))
@@ -131,24 +125,14 @@ class FakeTables:
     def tags(self, name: str) -> dict[str, str]:
         return dict(self.table_tags[name])
 
+    def is_empty(self, name: str) -> bool:
+        return not self.items.get(name)
+
     def delete(self, name: str) -> None:
         if name not in self.table_tags:
             return
         self.events.append(("delete_table", name))
         del self.table_tags[name]
-
-
-@dataclass
-class FakeResources:
-    """Non-bucket resources that exist in AWS, keyed by (type, sorted identifier)."""
-
-    live: set[tuple[str, tuple[tuple[str, str], ...]]] = field(default_factory=set)
-
-    def add(self, resource_type: str, identifier: Mapping[str, str]) -> None:
-        self.live.add((resource_type, tuple(sorted(identifier.items()))))
-
-    def exists(self, resource_type: str, identifier: Mapping[str, str]) -> bool:
-        return (resource_type, tuple(sorted(identifier.items()))) in self.live
 
 
 @dataclass
@@ -159,13 +143,7 @@ class FakeAws:
         self.stacks = FakeStacks(self.events)
         self.buckets = FakeBuckets(self.events)
         self.tables = FakeTables(self.events)
-        self.resources = FakeResources()
-        self.aws = Aws(
-            stacks=self.stacks,
-            buckets=self.buckets,
-            tables=self.tables,
-            resources=self.resources,
-        )
+        self.aws = Aws(stacks=self.stacks, buckets=self.buckets, tables=self.tables)
 
 
 def env_stack_tags(environment: str) -> dict[str, str]:
@@ -181,78 +159,21 @@ def dynamo_sync_tags(environment: str) -> dict[str, str]:
 
 
 def bucket_name(environment: str, purpose: str) -> str:
-    return f"rc-{environment}-{purpose}-{ACCOUNT_ID}"
+    """What CloudFormation generates for a bucket in rc-env-<environment>."""
+    from rc_infra.env_config import BUCKET_LOGICAL_IDS
+
+    return f"rc-env-{environment}-{BUCKET_LOGICAL_IDS[purpose].lower()}-a1b2c3d4e5f6"
 
 
-def matching_live_config(purpose: str) -> dict[str, Any]:
-    """Live S3 responses that match infra/environment.yaml for a purpose."""
-    lifecycle = {
-        "user-corpus": {
-            "Rules": [
-                {
-                    "ID": "ExpireRawUploads",
-                    "Status": "Enabled",
-                    "Filter": {"Prefix": "uploads/"},
-                    "Expiration": {"Days": 7},
-                }
-            ]
-        },
-        "schema-dumps": {
-            "Rules": [
-                {
-                    "ID": "ExpireSchemaDumps",
-                    "Status": "Enabled",
-                    "Filter": {},
-                    "Expiration": {"Days": 30},
-                }
-            ]
-        },
-    }.get(purpose)
-    cors = {
-        "user-corpus": {"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["PUT"], "AllowedOrigins": ["*"]}]},
-        "avatars": _browser_cors(["GET", "HEAD", "POST", "PUT"]),
-        "embeddings": _browser_cors(["GET", "HEAD", "POST", "PUT"]),
-        "property-registry": _browser_cors(["GET", "HEAD", "PUT"]),
-    }.get(purpose)
-    # Avatars serve public content through a bucket policy, so public access is open.
-    blocked = purpose != "avatars"
-    return {
-        "encryption": {
-            "ServerSideEncryptionConfiguration": {
-                "Rules": [
-                    {
-                        "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"},
-                        "BucketKeyEnabled": False,
-                    }
-                ]
-            }
-        },
-        "public_access_block": {
-            "PublicAccessBlockConfiguration": {
-                "BlockPublicAcls": blocked,
-                "BlockPublicPolicy": blocked,
-                "IgnorePublicAcls": blocked,
-                "RestrictPublicBuckets": blocked,
-            }
-        },
-        "versioning": {"Status": "Enabled"} if purpose == "property-registry" else {},
-        "lifecycle": lifecycle,
-        "cors": cors,
-    }
+def env_stack_outputs(environment: str) -> dict[str, str]:
+    from rc_infra.env_config import BUCKET_LOGICAL_IDS
 
-
-def _browser_cors(methods: list[str]) -> dict[str, Any]:
-    return {
-        "CORSRules": [
-            {
-                "AllowedHeaders": ["*"],
-                "AllowedMethods": methods,
-                "AllowedOrigins": ["*"],
-                "ExposeHeaders": ["ETag"],
-                "MaxAgeSeconds": 3600,
-            }
-        ]
-    }
+    outputs: dict[str, str] = {}
+    for purpose, logical_id in BUCKET_LOGICAL_IDS.items():
+        name = bucket_name(environment, purpose)
+        outputs[f"{logical_id}Name"] = name
+        outputs[f"{logical_id}Arn"] = f"arn:aws:s3:::{name}"
+    return outputs
 
 
 def env_stack_resources(environment: str) -> list[StackResource]:
@@ -268,7 +189,7 @@ def add_removed_environment(fake: FakeAws, name: str = "preview42") -> None:
     fake.stacks.add(f"rc-env-{name}", tags=env_stack_tags(name))
     fake.stacks.resources[f"rc-env-{name}"] = env_stack_resources(name)
     for purpose in BUCKET_LOGICAL_IDS:
-        fake.buckets.live[bucket_name(name, purpose)] = {}
+        fake.buckets.live[bucket_name(name, purpose)] = 0
     fake.stacks.add(f"rc-app-{name}")
     fake.tables.table_tags[f"rc-{name}-users"] = dynamo_sync_tags(name)
     fake.tables.table_tags[f"rc-{name}-messages"] = dynamo_sync_tags(name)

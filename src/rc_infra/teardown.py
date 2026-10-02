@@ -16,7 +16,6 @@ from rc_infra.aws import Aws, Stack
 from rc_infra.env_config import (
     APP_STACK_PREFIX,
     PROTECTED_ENVIRONMENTS,
-    RESOURCE_PREFIX,
     core_stack_name,
     table_prefix,
 )
@@ -82,7 +81,8 @@ def inventory(environment: str, aws: Aws) -> Inventory:
             unmanaged.append(name)
 
     core_stack = core_stack_name(environment)
-    bucket_prefix = f"{RESOURCE_PREFIX}-{environment}-"
+    # CloudFormation names the stack's buckets <stack>-<logical id>-<suffix>.
+    bucket_prefix = f"{core_stack}-"
     buckets: list[str] = []
     for resource in aws.stacks.stack_resources(core_stack):
         if resource.resource_type != "AWS::S3::Bucket" or not resource.physical_id:

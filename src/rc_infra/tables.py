@@ -1,4 +1,4 @@
-"""DynamoDB operations used by teardown. Tables are owned by rc-dynamo-sync, not CloudFormation."""
+"""DynamoDB operations used by status and teardown. Tables are owned by rc-dynamo-sync, not CloudFormation."""
 
 from __future__ import annotations
 
@@ -30,6 +30,9 @@ class DynamoTables:
         for page in self._dynamodb.get_paginator("list_tags_of_resource").paginate(ResourceArn=arn):
             tags.update({tag["Key"]: tag["Value"] for tag in page.get("Tags", [])})
         return tags
+
+    def is_empty(self, name: str) -> bool:
+        return not self._dynamodb.scan(TableName=name, Limit=1).get("Items")
 
     def delete(self, name: str) -> None:
         try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -60,3 +61,31 @@ def test_apply_without_yes_is_a_dry_run(connected: FakeAws) -> None:
 def test_apply_with_yes(connected: FakeAws) -> None:
     assert main(["apply", "--yes"]) == 0
     assert connected.stacks.deploys
+
+
+def test_apply_prints_data_status(connected: FakeAws, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["apply", "--yes"]) == 0
+    assert "DATA STATUS" in capsys.readouterr().out
+
+
+def test_status(connected: FakeAws, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["status", "--environment", "dev"]) == 0
+    out = capsys.readouterr().out
+    assert "dev / EmbeddingsBucket" in out
+    assert "prod /" not in out
+
+
+def test_status_json(connected: FakeAws, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["status", "--format", "json"]) == 0
+    assert {row["state"] for row in json.loads(capsys.readouterr().out)} == {"NOT CREATED"}
+
+
+def test_status_unknown_environment_is_a_usage_error(connected: FakeAws) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(["status", "--environment", "nope"])
+    assert caught.value.code == 2
+
+
+def test_outputs_without_stacks_fails(connected: FakeAws, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["outputs", "--environment", "dev"]) == 1
+    assert "rc-platform does not exist" in capsys.readouterr().err

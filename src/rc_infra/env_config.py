@@ -1,9 +1,10 @@
 """Load and validate envs.yaml, and derive every resource name from it.
 
-The config is the only place environment names are declared. Everything else --
-stack names, bucket names, table prefixes, SSM paths -- is derived here so that
-planning, applying, and tearing down can never disagree about what belongs to an
-environment.
+The config is the only place environment names are declared. Every name rc-infra
+chooses -- stack names, table prefixes -- is derived here so that planning, applying,
+and tearing down can never disagree about what belongs to an environment. Names AWS
+generates (buckets, pool and client IDs) are never derived: they are read back from
+stack outputs.
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
 # These environments can never be removed from the config or torn down.
 PROTECTED_ENVIRONMENTS = frozenset({"prod", "staging", "dev"})
 
-# No hyphens: "rc-<env>-" must be an unambiguous prefix (rc-preview1- vs rc-preview1-x-),
-# and 20 characters keeps the longest bucket name well under S3's 63-character limit.
+# No hyphens: "rc-env-<env>-" and "rc-<env>-" must be unambiguous prefixes
+# (rc-env-preview1- vs rc-env-preview1-x-), and 20 characters keeps generated bucket
+# names well under S3's 63-character limit.
 ENVIRONMENT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]{1,19}$")
 
 DEFAULT_IDENTITY_PROFILE = "preview"
@@ -44,6 +46,7 @@ RESOURCE_PREFIX = "rc"
 CORE_STACK_PREFIX = f"{RESOURCE_PREFIX}-env-"
 APP_STACK_PREFIX = f"{RESOURCE_PREFIX}-app-"
 PLATFORM_STACK_NAME = f"{RESOURCE_PREFIX}-platform"
+IDENTITY_STACK_NAME = f"{RESOURCE_PREFIX}-identity"
 
 
 class EnvConfigError(Exception):
@@ -59,9 +62,7 @@ class _Strict(BaseModel):
 
 
 class IdentityProfile(_Strict):
-    user_pool_id: str = Field(pattern=r"^[a-z]{2}-[a-z]+-\d_[A-Za-z0-9]+$")
-    client_id: str = Field(min_length=1)
-    domain: str = Field(min_length=1)
+    """A Cognito pool, client and domain in rc-identity. Nothing to configure yet."""
 
 
 class EnvironmentSpec(_Strict):
@@ -75,7 +76,7 @@ class EnvConfigFile(_Strict):
     identity_profiles: dict[str, IdentityProfile]
     environments: dict[str, EnvironmentSpec]
 
-    @field_validator("environments", mode="before")
+    @field_validator("identity_profiles", "environments", mode="before")
     @classmethod
     def _empty_entries_are_defaults(cls, value: Any) -> Any:
         # "preview3:" with nothing after it parses as None; treat it like "preview3: {}".
@@ -90,7 +91,6 @@ class Environment:
     account_id: str
     region: str
     identity_profile: str
-    identity: IdentityProfile
 
     @property
     def protected(self) -> bool:
@@ -108,11 +108,6 @@ class Environment:
     def table_prefix(self) -> str:
         return table_prefix(self.name)
 
-    @property
-    def buckets(self) -> dict[str, str]:
-        """Bucket purpose -> bucket name."""
-        return {purpose: f"{RESOURCE_PREFIX}-{self.name}-{purpose}-{self.account_id}" for purpose in BUCKET_LOGICAL_IDS}
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -122,9 +117,7 @@ class Environment:
             "core_stack": self.core_stack,
             "app_stack": self.app_stack,
             "table_prefix": self.table_prefix,
-            "buckets": self.buckets,
             "identity_profile": self.identity_profile,
-            "identity": self.identity.model_dump(),
         }
 
 
@@ -134,8 +127,7 @@ class EnvConfig:
     region: str
     environments: tuple[Environment, ...]
     # Kept whole, not just per environment: the identity resources belong to the
-    # platform stack, which has no environment to resolve them through, and their
-    # IDs are how an import identifies the pools AWS already assigned.
+    # rc-identity stack, which has no environment to resolve them through.
     identity_profiles: Mapping[str, IdentityProfile] = field(default_factory=dict)
 
     @property
@@ -212,8 +204,7 @@ def parse_env_config(raw: Any) -> EnvConfig:
             continue
 
         profile_name = spec.identity or _default_identity_profile(name, parsed.identity_profiles)
-        profile = parsed.identity_profiles.get(profile_name)
-        if profile is None:
+        if profile_name not in parsed.identity_profiles:
             errors.append(f"environments.{name}.identity: unknown identity profile {profile_name!r}; defined: {sorted(parsed.identity_profiles)}")
             continue
 
@@ -223,7 +214,6 @@ def parse_env_config(raw: Any) -> EnvConfig:
                 account_id=parsed.account_id,
                 region=parsed.region,
                 identity_profile=profile_name,
-                identity=profile,
             )
         )
 

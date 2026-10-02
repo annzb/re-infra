@@ -6,10 +6,10 @@ exercise them against in-memory fakes (tests/fakes.py) instead of mocked boto3.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
 
 import boto3
 
@@ -17,7 +17,6 @@ import boto3
 class ChangeSetKind(StrEnum):
     CREATE = "CREATE"
     UPDATE = "UPDATE"
-    IMPORT = "IMPORT"
 
 
 @dataclass(frozen=True)
@@ -26,6 +25,7 @@ class Stack:
     status: str
     tags: Mapping[str, str] = field(default_factory=dict)
     termination_protection: bool = False
+    outputs: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def is_pending_review(self) -> bool:
@@ -59,19 +59,6 @@ class ResourceChange:
 
 
 @dataclass(frozen=True)
-class ImportTarget:
-    """One existing resource a stack adopts, and how CloudFormation identifies it."""
-
-    logical_id: str
-    resource_type: str
-    # The ResourceIdentifier CloudFormation expects for this type, for example
-    # {"UserPoolId": ..., "ClientId": ...}. Every key is part of the primary identifier.
-    identifier: Mapping[str, str]
-    # What the plan prints: the physical name a reader would recognise.
-    describe: str
-
-
-@dataclass(frozen=True)
 class StackResource:
     logical_id: str
     physical_id: str
@@ -89,7 +76,6 @@ class StackApi(Protocol):
         self,
         stack_name: str,
         template_body: str,
-        parameters: Mapping[str, str],
         tags: Mapping[str, str],
     ) -> list[ResourceChange]:
         """Changes an UPDATE would make. Never executes anything."""
@@ -100,9 +86,7 @@ class StackApi(Protocol):
         stack_name: str,
         kind: ChangeSetKind,
         template_body: str,
-        parameters: Mapping[str, str],
         tags: Mapping[str, str],
-        resources_to_import: Sequence[Mapping[str, Any]] = (),
     ) -> list[ResourceChange]:
         """Create and execute a change set, waiting for completion. Returns what changed."""
         ...
@@ -117,12 +101,8 @@ class StackApi(Protocol):
 class BucketApi(Protocol):
     def exists(self, name: str) -> bool: ...
 
-    def owner_stack(self, name: str) -> str | None:
-        """The CloudFormation stack that manages the bucket, if any."""
-        ...
-
-    def live_config(self, name: str) -> dict[str, Any]:
-        """Raw configuration responses, keyed as buckets.normalize_live expects."""
+    def is_empty(self, name: str, include_versions: bool = False) -> bool:
+        """No current objects; with include_versions, no noncurrent versions or delete markers either."""
         ...
 
     def empty_and_delete(self, name: str) -> None:
@@ -130,16 +110,14 @@ class BucketApi(Protocol):
         ...
 
 
-class ResourceApi(Protocol):
-    def exists(self, resource_type: str, identifier: Mapping[str, str]) -> bool:
-        """Whether the resource CloudFormation would import already exists."""
-        ...
-
-
 class TableApi(Protocol):
     def list_names(self, prefix: str) -> list[str]: ...
 
     def tags(self, name: str) -> dict[str, str]: ...
+
+    def is_empty(self, name: str) -> bool:
+        """Exact: an unfiltered one-item scan, never DescribeTable's approximate ItemCount."""
+        ...
 
     def delete(self, name: str) -> None:
         """Delete and wait. A missing table is a no-op."""
@@ -151,13 +129,11 @@ class Aws:
     stacks: StackApi
     buckets: BucketApi
     tables: TableApi
-    resources: ResourceApi
 
 
 def connect(region: str) -> Aws:
     from rc_infra.buckets import S3Buckets
     from rc_infra.cfn import CloudFormationStacks
-    from rc_infra.resources import LiveResources
     from rc_infra.tables import DynamoTables
 
     session = boto3.Session(region_name=region)
@@ -165,7 +141,6 @@ def connect(region: str) -> Aws:
         stacks=CloudFormationStacks(session.client("cloudformation")),
         buckets=S3Buckets(session.client("s3")),
         tables=DynamoTables(session.client("dynamodb")),
-        resources=LiveResources(session),
     )
 
 

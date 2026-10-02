@@ -73,7 +73,7 @@ def test_termination_protected_stack_is_refused(env_config: EnvConfig, fake: Fak
 def test_bucket_outside_environment_prefix_is_refused(env_config: EnvConfig, fake: FakeAws) -> None:
     add_removed_environment(fake, "preview42")
     fake.stacks.resources["rc-env-preview42"].append(StackResource("Stray", bucket_name("prod", "embeddings"), "AWS::S3::Bucket"))
-    with pytest.raises(TeardownRefused, match="does not start with rc-preview42-"):
+    with pytest.raises(TeardownRefused, match="does not start with rc-env-preview42-"):
         teardown("preview42", fake.aws, env_config.names, log=_quiet)
     assert fake.events == []
 

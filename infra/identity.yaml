@@ -1,0 +1,398 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Retribalize identity resources (stack rc-identity): one Cognito user pool, app
+  client and hosted UI domain per identity profile in envs.yaml. Deployed by
+  `rc-infra apply`; do not deploy by hand.
+
+# Conventions (rc-infra parses this file with yaml.safe_load):
+#   - Long-form intrinsics only (Fn::GetAtt with a list, Ref), never !GetAtt.
+#   - Everything here is Retain, and rc-infra refuses any plan that would replace
+#     or remove a pool, client or domain: a replaced pool loses every account in it.
+#   - The YAML anchor below is resolved by yaml.safe_load; rc-infra re-serializes
+#     the result to JSON (templates.py), so CloudFormation never sees an alias.
+#   - Logical IDs follow <Profile>UserPool / <Profile>UserPoolClient /
+#     <Profile>UserPoolDomain; env_config.py checks every profile has all three.
+#   - Pool names and domain prefixes carry the -v3 generation suffix so this stack
+#     can be created while the older pools still exist. Domain prefixes are
+#     globally unique, which is why CloudFormation cannot generate them.
+#   - No LambdaConfig: the trigger functions belong to retribalize-core and are
+#     wired in a later stack update, once core has deployed against these pools.
+#   - No identity providers: AWS::Cognito::UserPoolIdentityProvider carries the
+#     provider client secret, so the clients support COGNITO only for now.
+#     See infra/identity.md.
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W1100  # YAML merge keys: resolved at parse time, never sent to CloudFormation
+        - W1101  # YAML aliases: same
+
+Resources:
+  # The four pools differ only in UserPoolName; everything else is shared through
+  # the anchor on ProdUserPool. Changing Schema, UsernameAttributes or
+  # AliasAttributes forces replacement.
+  ProdUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties: &pool-common
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+        - Priority: 1
+          Name: verified_email
+      AdminCreateUserConfig:
+        UnusedAccountValidityDays: 7
+        AllowAdminCreateUserOnly: false
+      AliasAttributes: []
+      AutoVerifiedAttributes:
+      - email
+      DeletionProtection: INACTIVE
+      EmailConfiguration:
+        SourceArn: arn:aws:ses:us-east-1:273268178059:identity/no-reply@retribalize.ai
+        EmailSendingAccount: DEVELOPER
+        From: no-reply@retribalize.ai
+      IssuerConfiguration:
+        Type: ORIGINAL
+      KeyConfiguration:
+        KeyType: AWS_OWNED_KEY
+      MfaConfiguration: 'OFF'
+      Policies:
+        PasswordPolicy:
+          TemporaryPasswordValidityDays: 7
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireLowercase: true
+          MinimumLength: 8
+          RequireSymbols: true
+        SignInPolicy:
+          AllowedFirstAuthFactors:
+          - PASSWORD
+      # Only the custom attributes are declared. Cognito maintains the ~21
+      # standard OIDC attributes (email, name, sub, phone_number_verified, ...)
+      # implicitly, and none of them is marked Required on these pools except
+      # `sub`, which is always implicit. Listing them here would add nothing and
+      # would break cfn-lint's 20-character limit on an attribute name.
+      #
+      # Schema is replacement-forcing and cannot be changed in place. Adding an
+      # attribute means creating it on the deployed pools first, then recording it
+      # here -- never the other way round.
+      Schema:
+      - Name: custom:user_id
+        AttributeDataType: String
+        DeveloperOnlyAttribute: false
+        Mutable: true
+        Required: false
+        StringAttributeConstraints:
+          MinLength: '0'
+          MaxLength: '256'
+      - Name: custom:supabase_id
+        AttributeDataType: String
+        DeveloperOnlyAttribute: false
+        Mutable: true
+        Required: false
+        StringAttributeConstraints:
+          MinLength: '0'
+          MaxLength: '256'
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate: []
+      UserPoolTags: {}
+      UserPoolTier: ESSENTIALS
+      UsernameAttributes:
+      - email
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+      UserPoolName: rc-prod-user-pool-v3
+
+  StagingUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *pool-common
+      UserPoolName: rc-staging-user-pool-v3
+
+  DevUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *pool-common
+      UserPoolName: rc-dev-user-pool-v3
+
+  PreviewUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *pool-common
+      UserPoolName: rc-preview-user-pool-v3
+
+  # App clients. No client secret is generated for any of them (these are public
+  # mobile/web clients), so nothing here is sensitive.
+
+  ProdUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClientName: rc-prod-app-client
+      UserPoolId:
+        Ref: ProdUserPool
+      AllowedOAuthFlows:
+      - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+      - email
+      - openid
+      - profile
+      AuthSessionValidity: 3
+      CallbackURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-core.vercel.app/login
+      - https://retribalize-prod.vercel.app/login
+      - https://retribalize.ai/login
+      - https://www.retribalize.ai/login
+      - retribalize://login
+      EnablePropagateAdditionalUserContextData: false
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+      - ALLOW_REFRESH_TOKEN_AUTH
+      - ALLOW_USER_PASSWORD_AUTH
+      - ALLOW_USER_SRP_AUTH
+      GenerateSecret: false
+      LogoutURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-core.vercel.app/login
+      - https://retribalize-prod.vercel.app/login
+      - https://retribalize.ai/login
+      - https://www.retribalize.ai/login
+      - retribalize://login
+      ReadAttributes: []
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders:
+      - COGNITO
+      TokenValidityUnits: {}
+      WriteAttributes: []
+
+  StagingUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClientName: rc-staging-app-client
+      UserPoolId:
+        Ref: StagingUserPool
+      AllowedOAuthFlows:
+      - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+      - email
+      - openid
+      - profile
+      AuthSessionValidity: 3
+      CallbackURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-staging.vercel.app/login
+      - retribalize://login
+      EnablePropagateAdditionalUserContextData: false
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+      - ALLOW_REFRESH_TOKEN_AUTH
+      - ALLOW_USER_PASSWORD_AUTH
+      - ALLOW_USER_SRP_AUTH
+      GenerateSecret: false
+      LogoutURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-staging.vercel.app/login
+      - retribalize://login
+      ReadAttributes: []
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders:
+      - COGNITO
+      TokenValidityUnits: {}
+      WriteAttributes: []
+
+  DevUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClientName: rc-dev-app-client
+      UserPoolId:
+        Ref: DevUserPool
+      AllowedOAuthFlows:
+      - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+      - email
+      - openid
+      - profile
+      AuthSessionValidity: 3
+      CallbackURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-dev.vercel.app/login
+      - retribalize://login
+      EnablePropagateAdditionalUserContextData: false
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+      - ALLOW_REFRESH_TOKEN_AUTH
+      - ALLOW_USER_PASSWORD_AUTH
+      - ALLOW_USER_SRP_AUTH
+      GenerateSecret: false
+      LogoutURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-dev.vercel.app/login
+      - retribalize://login
+      ReadAttributes: []
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders:
+      - COGNITO
+      TokenValidityUnits: {}
+      WriteAttributes: []
+
+  PreviewUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ClientName: rc-preview-app-client
+      UserPoolId:
+        Ref: PreviewUserPool
+      AccessTokenValidity: 60
+      AllowedOAuthFlows:
+      - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+      - email
+      - openid
+      - profile
+      AuthSessionValidity: 3
+      CallbackURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-preview1.vercel.app/login
+      - https://retribalize-preview2.vercel.app/login
+      - https://retribalize-preview3.vercel.app/login
+      - https://retribalize-preview4.vercel.app/login
+      - https://retribalize-preview5.vercel.app/login
+      - https://retribalize-preview6.vercel.app/login
+      - https://retribalize-preview67.vercel.app/login
+      - https://retribalize-preview7.vercel.app/login
+      - https://retribalize-preview8.vercel.app/login
+      - retribalize://login
+      EnablePropagateAdditionalUserContextData: false
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+      - ALLOW_CUSTOM_AUTH
+      - ALLOW_REFRESH_TOKEN_AUTH
+      - ALLOW_USER_PASSWORD_AUTH
+      GenerateSecret: false
+      IdTokenValidity: 60
+      LogoutURLs:
+      - http://localhost:19006/login
+      - http://localhost:8081/login
+      - https://retribalize-preview1.vercel.app/login
+      - https://retribalize-preview2.vercel.app/login
+      - https://retribalize-preview3.vercel.app/login
+      - https://retribalize-preview4.vercel.app/login
+      - https://retribalize-preview5.vercel.app/login
+      - https://retribalize-preview6.vercel.app/login
+      - https://retribalize-preview67.vercel.app/login
+      - https://retribalize-preview7.vercel.app/login
+      - https://retribalize-preview8.vercel.app/login
+      - retribalize://login
+      ReadAttributes: []
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders:
+      - COGNITO
+      TokenValidityUnits:
+        IdToken: minutes
+        AccessToken: minutes
+        RefreshToken: days
+      WriteAttributes: []
+
+  # Hosted UI domains. The <Profile>OAuthDomain outputs carry the full hostname
+  # (<prefix>.auth.<region>.amazoncognito.com) that retribalize-core receives as
+  # its CognitoOAuthDomain parameter.
+
+  ProdUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Domain: rc-prod-v3
+      UserPoolId:
+        Ref: ProdUserPool
+
+  StagingUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Domain: rc-staging-v3
+      UserPoolId:
+        Ref: StagingUserPool
+
+  DevUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Domain: rc-dev-v3
+      UserPoolId:
+        Ref: DevUserPool
+
+  PreviewUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Domain: rc-preview-v3
+      UserPoolId:
+        Ref: PreviewUserPool
+
+
+Outputs:
+  ProdUserPoolId:
+    Value:
+      Ref: ProdUserPool
+  ProdUserPoolClientId:
+    Value:
+      Ref: ProdUserPoolClient
+  ProdOAuthDomain:
+    Value:
+      Fn::Sub: "${ProdUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+  StagingUserPoolId:
+    Value:
+      Ref: StagingUserPool
+  StagingUserPoolClientId:
+    Value:
+      Ref: StagingUserPoolClient
+  StagingOAuthDomain:
+    Value:
+      Fn::Sub: "${StagingUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+  DevUserPoolId:
+    Value:
+      Ref: DevUserPool
+  DevUserPoolClientId:
+    Value:
+      Ref: DevUserPoolClient
+  DevOAuthDomain:
+    Value:
+      Fn::Sub: "${DevUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+  PreviewUserPoolId:
+    Value:
+      Ref: PreviewUserPool
+  PreviewUserPoolClientId:
+    Value:
+      Ref: PreviewUserPoolClient
+  PreviewOAuthDomain:
+    Value:
+      Fn::Sub: "${PreviewUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"

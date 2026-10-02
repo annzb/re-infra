@@ -1,4 +1,4 @@
-"""Carry out a plan: deploy the platform and environment stacks, then tear down removed ones."""
+"""Carry out a plan: deploy the platform, identity and environment stacks, then tear down removed ones."""
 
 from __future__ import annotations
 
@@ -6,19 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from rc_infra.aws import Aws, ChangeSetKind
-from rc_infra.env_config import PROTECTED_ENVIRONMENTS, EnvConfig
-from rc_infra.planner import PLATFORM_TARGET, Action, ActionKind, Plan
+from rc_infra.env_config import EnvConfig
+from rc_infra.planner import Action, ActionKind, Plan, StackSpec, stack_specs
 from rc_infra.teardown import teardown
-from rc_infra.templates import (
-    ENVIRONMENT_TEMPLATE_PATH,
-    PLATFORM_TEMPLATE_PATH,
-    environment_parameters,
-    environment_tags,
-    import_template,
-    load_template,
-    platform_tags,
-    template_body,
-)
+from rc_infra.templates import load_template, template_body
+
+_CHANGE_SETS = {ActionKind.CREATE: ChangeSetKind.CREATE, ActionKind.UPDATE: ChangeSetKind.UPDATE}
 
 
 class ApplyRefused(Exception):
@@ -32,14 +25,11 @@ class ApplyResult:
 
 
 def apply_plan(plan: Plan, config: EnvConfig, aws: Aws, log: Callable[[str], None] = print) -> ApplyResult:
-    # A blocked preview is that preview's problem; a blocked protected environment or
-    # a blocked platform stack means the shared foundation is wrong, and applying the
-    # rest on top of it would be building on something nobody has looked at yet.
-    halting = [a for a in plan.blocked if a.target in PROTECTED_ENVIRONMENTS or a.target == PLATFORM_TARGET]
-    if halting:
-        targets = ", ".join(a.target for a in halting)
+    if plan.halting:
+        targets = ", ".join(a.target for a in plan.halting)
         raise ApplyRefused(f"plan blocks {targets}; nothing was applied")
 
+    specs = {spec.target: spec for spec in stack_specs(config)}
     result = ApplyResult()
     # Creates and updates first, deletions last.
     for action in sorted(plan.actions, key=lambda a: a.kind is ActionKind.DELETE):
@@ -48,7 +38,10 @@ def apply_plan(plan: Plan, config: EnvConfig, aws: Aws, log: Callable[[str], Non
             result.failed.append(f"{action.target}: blocked")
             continue
         try:
-            _apply_action(action, config, aws, log)
+            if action.kind is ActionKind.DELETE:
+                teardown(action.target, aws, config.names, log)
+            elif action.kind in _CHANGE_SETS:
+                _deploy(action, specs[action.target], aws, log)
         except Exception as exc:  # one environment's failure must not stop the others
             log(f"{action.target}: FAILED: {exc}")
             result.failed.append(f"{action.target}: {exc}")
@@ -57,70 +50,21 @@ def apply_plan(plan: Plan, config: EnvConfig, aws: Aws, log: Callable[[str], Non
     return result
 
 
-def _apply_action(action: Action, config: EnvConfig, aws: Aws, log: Callable[[str], None]) -> None:
-    if action.kind is ActionKind.DELETE:
-        teardown(action.target, aws, config.names, log)
-        return
-
-    if action.target == PLATFORM_TARGET:
-        template = load_template(PLATFORM_TEMPLATE_PATH)
-        parameters: dict[str, str] = {}
-        tags = platform_tags()
-        protect = True
-    else:
-        env = config.get(action.target)
-        template = load_template(ENVIRONMENT_TEMPLATE_PATH)
-        parameters = environment_parameters(env)
-        tags = environment_tags(env)
-        protect = env.protected
-
+def _deploy(action: Action, spec: StackSpec, aws: Aws, log: Callable[[str], None]) -> None:
     if action.replace_failed_stack:
         log(f"{action.target}: deleting rolled-back stack {action.stack}")
         aws.stacks.delete_stack(action.stack)
 
-    body = template_body(template)
-    if action.kind is ActionKind.IMPORT:
-        log(f"{action.target}: importing {', '.join(target.describe for target in action.imports)}")
-        aws.stacks.deploy(
-            action.stack,
-            ChangeSetKind.IMPORT,
-            template_body(import_template(template, [target.logical_id for target in action.imports])),
-            parameters,
-            tags,
-            resources_to_import=[
-                {
-                    "ResourceType": target.resource_type,
-                    "LogicalResourceId": target.logical_id,
-                    "ResourceIdentifier": dict(target.identifier),
-                }
-                for target in action.imports
-            ],
-        )
-        _deploy(action, ChangeSetKind.UPDATE, body, parameters, tags, aws, log)
-    elif action.kind is ActionKind.CREATE:
-        _deploy(action, ChangeSetKind.CREATE, body, parameters, tags, aws, log)
-    elif action.kind is ActionKind.UPDATE:
-        _deploy(action, ChangeSetKind.UPDATE, body, parameters, tags, aws, log)
-
-    if protect:
-        stack = aws.stacks.get_stack(action.stack)
-        if stack is not None and not stack.termination_protection:
-            log(f"{action.target}: enabling termination protection on {action.stack}")
-            aws.stacks.set_termination_protection(action.stack, True)
-
-
-def _deploy(
-    action: Action,
-    kind: ChangeSetKind,
-    body: str,
-    parameters: dict[str, str],
-    tags: dict[str, str],
-    aws: Aws,
-    log: Callable[[str], None],
-) -> None:
+    kind = _CHANGE_SETS[action.kind]
     log(f"{action.target}: {kind.value.lower()} {action.stack}")
-    changes = aws.stacks.deploy(action.stack, kind, body, parameters, tags)
+    changes = aws.stacks.deploy(action.stack, kind, template_body(load_template(spec.template_path)), spec.tags)
     for change in changes:
         log(f"{action.target}:   {change.describe()}")
     if not changes:
         log(f"{action.target}:   no changes")
+
+    if spec.protect:
+        stack = aws.stacks.get_stack(action.stack)
+        if stack is not None and not stack.termination_protection:
+            log(f"{action.target}: enabling termination protection on {action.stack}")
+            aws.stacks.set_termination_protection(action.stack, True)

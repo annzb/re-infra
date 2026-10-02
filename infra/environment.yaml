@@ -8,20 +8,15 @@ Description: >
 #   - Long-form intrinsics only (Fn::Sub, Ref), never !Sub / !Ref.
 #   - Every bucket is Retain. Deleting the stack never deletes data; rc-infra
 #     empties and deletes preview buckets explicitly during teardown.
-#   - Existing buckets are adopted with a CloudFormation import, which only
-#     succeeds cleanly when the properties below match the live bucket.
+#   - No BucketName: CloudFormation generates rc-env-<environment>-<logical id>-<suffix>,
+#     which teardown relies on. Callers read the names from the outputs below
+#     (`rc-infra outputs`), never reconstruct them.
 #   - DynamoDB tables are NOT declared here. rc-dynamo-sync (retribalize-core)
 #     owns their creation and schema.
 #   - Cognito is NOT declared here. The pools are shared by several environments
-#     (all previews use one), so they belong to rc-platform, not to any one
-#     environment. See infra/identity.md.
+#     (all previews use one), so they belong to rc-identity. See infra/identity.md.
 #   - No NotificationConfiguration on UserCorpusBucket. retribalize-core's
 #     setup_corpus_triggers.py owns that bucket's notifications.
-
-Parameters:
-  EnvironmentName:
-    Type: String
-    AllowedPattern: "^[a-z][a-z0-9]{1,19}$"
 
 Resources:
   EmbeddingsBucket:
@@ -29,8 +24,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      BucketName:
-        Fn::Sub: "rc-${EnvironmentName}-embeddings-${AWS::AccountId}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -40,10 +33,6 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      # rc-prod-embeddings already carries this rule and the other environments do
-      # not. Declaring it matches prod exactly -- so adopting prod changes nothing --
-      # and adds a rule elsewhere that grants no access on a bucket whose public
-      # access is blocked.
       CorsConfiguration:
         CorsRules:
           - AllowedHeaders: ["*"]
@@ -57,8 +46,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      BucketName:
-        Fn::Sub: "rc-${EnvironmentName}-user-corpus-${AWS::AccountId}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -83,8 +70,7 @@ Resources:
   # The one public bucket. It serves avatars, project banners, user galleries, blog
   # covers and event photos straight to browsers through a bucket policy granting
   # s3:GetObject on those prefixes. The policy itself is NOT declared here: its
-  # statement list differs per environment, and it is a separate resource that the
-  # import leaves alone.
+  # statement list differs per environment, and it is managed outside this template.
   #
   # Public access must therefore stay unblocked. Setting BlockPublicPolicy would
   # reject that policy and every image in the product would stop loading.
@@ -93,8 +79,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      BucketName:
-        Fn::Sub: "rc-${EnvironmentName}-avatars-${AWS::AccountId}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -117,8 +101,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      BucketName:
-        Fn::Sub: "rc-${EnvironmentName}-recordings-${AWS::AccountId}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -134,8 +116,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      BucketName:
-        Fn::Sub: "rc-${EnvironmentName}-schema-dumps-${AWS::AccountId}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -152,15 +132,12 @@ Resources:
             ExpirationInDays: 30
 
   # Durable per-environment registry of property definitions. Versioned, because a
-  # definition that is overwritten by mistake has to be recoverable. It exists today
-  # for prod, staging, dev and preview89; the rest are created.
+  # definition that is overwritten by mistake has to be recoverable.
   PropertyRegistryBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      BucketName:
-        Fn::Sub: "rc-${EnvironmentName}-property-registry-${AWS::AccountId}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -179,3 +156,41 @@ Resources:
             AllowedOrigins: ["*"]
             ExposedHeaders: [ETag]
             MaxAge: 3600
+
+Outputs:
+  EmbeddingsBucketName:
+    Value:
+      Ref: EmbeddingsBucket
+  EmbeddingsBucketArn:
+    Value:
+      Fn::GetAtt: [EmbeddingsBucket, Arn]
+  UserCorpusBucketName:
+    Value:
+      Ref: UserCorpusBucket
+  UserCorpusBucketArn:
+    Value:
+      Fn::GetAtt: [UserCorpusBucket, Arn]
+  AvatarsBucketName:
+    Value:
+      Ref: AvatarsBucket
+  AvatarsBucketArn:
+    Value:
+      Fn::GetAtt: [AvatarsBucket, Arn]
+  RecordingsBucketName:
+    Value:
+      Ref: RecordingsBucket
+  RecordingsBucketArn:
+    Value:
+      Fn::GetAtt: [RecordingsBucket, Arn]
+  SchemaDumpsBucketName:
+    Value:
+      Ref: SchemaDumpsBucket
+  SchemaDumpsBucketArn:
+    Value:
+      Fn::GetAtt: [SchemaDumpsBucket, Arn]
+  PropertyRegistryBucketName:
+    Value:
+      Ref: PropertyRegistryBucket
+  PropertyRegistryBucketArn:
+    Value:
+      Fn::GetAtt: [PropertyRegistryBucket, Arn]

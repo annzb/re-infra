@@ -12,7 +12,7 @@ FROM ghcr.io/astral-sh/uv:0.12.15 AS uv
 # Multi-arch index digest of public.ecr.aws/lambda/python:3.11; build with
 # --platform linux/amd64. Bump through Dependabot or by re-resolving:
 #   docker buildx imagetools inspect public.ecr.aws/lambda/python:3.11
-FROM public.ecr.aws/lambda/python:3.11@sha256:cc940054e77d4a160c611a20c09cb8ab9325c09d72555a164329eb3e46957d80
+FROM public.ecr.aws/lambda/python:3.14@sha256:ed43a34c17abb2f8b6aa193c42e8b8754594e0541eba095fcc04aaf01c76e4aa
 
 # Image-native Datadog Lambda Extension, disabled by default exactly as the
 # service images configure it. The datadog-lambda Python wrapper stays in the

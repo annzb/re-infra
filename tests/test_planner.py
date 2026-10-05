@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from rc_infra.aws import ResourceChange
 from rc_infra.env_config import EnvConfig
 from rc_infra.planner import PLATFORM_TARGET, Action, ActionKind, Plan, build_plan, render_text
@@ -110,6 +112,17 @@ def test_rolled_back_stack_is_recreated(env_config: EnvConfig, fake: FakeAws) ->
 
     assert action.kind is ActionKind.CREATE
     assert action.replace_failed_stack
+
+
+@pytest.mark.parametrize("status", ["ROLLBACK_COMPLETE", "REVIEW_IN_PROGRESS"])
+def test_foreign_stack_is_blocked_whatever_its_status(env_config: EnvConfig, fake: FakeAws, status: str) -> None:
+    fake.stacks.add("rc-platform", status=status, tags={"ManagedBy": "someone-else", "Component": "platform"})
+
+    action = _by_target(build_plan(env_config, fake.aws))[PLATFORM_TARGET]
+
+    assert action.kind is ActionKind.BLOCKED
+    assert not action.replace_failed_stack
+    assert "not owned by re-infra" in action.details[0]
 
 
 def test_removed_environment_is_deleted(env_config: EnvConfig, fake: FakeAws) -> None:

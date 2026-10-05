@@ -177,19 +177,21 @@ def _plan_stack(spec: StackSpec, body: str, aws: Aws) -> Action:
     whether some other resource already uses a name is never asked, because every
     name in the templates is either generated or new to this generation."""
     stack: Stack | None = aws.stacks.get_stack(spec.stack)
-    if stack is None or stack.is_pending_review or stack.is_failed_create:
-        replace = stack is not None and stack.is_failed_create
-        return Action(ActionKind.CREATE, spec.target, spec.stack, replace_failed_stack=replace)
-    foreign = {key: stack.tags.get(key) for key, value in spec.tags.items() if stack.tags.get(key) != value}
+    if stack is None:
+        return Action(ActionKind.CREATE, spec.target, spec.stack)
+    # Checked for every existing stack, whatever its status: a stack of this name that
+    # re-infra did not create is never taken over by deploying over it, never deleted
+    # and recreated because it failed, and never "adopted" by applying our tags to it.
+    foreign = foreign_tags(spec, stack)
     if foreign:
-        # A stack of this name that re-infra did not create is never taken over by
-        # deploying over it, and never "adopted" by applying our tags to it.
         return Action(
             ActionKind.BLOCKED,
             spec.target,
             spec.stack,
-            details=(f"{spec.stack} exists but is not owned by re-infra (mismatched tags: {foreign}); refusing to update it",),
+            details=(f"{spec.stack} exists but is not owned by re-infra (mismatched tags: {foreign}); refusing to touch it",),
         )
+    if stack.is_pending_review or stack.is_failed_create:
+        return Action(ActionKind.CREATE, spec.target, spec.stack, replace_failed_stack=stack.is_failed_create)
     if stack.is_busy or stack.is_broken:
         return Action(
             ActionKind.BLOCKED,
@@ -207,6 +209,11 @@ def _plan_stack(spec: StackSpec, body: str, aws: Aws) -> Action:
     except DestructiveChange as exc:
         return Action(ActionKind.BLOCKED, spec.target, spec.stack, details=tuple(str(exc).splitlines()))
     return Action(ActionKind.UPDATE, spec.target, spec.stack, details=tuple(c.describe() for c in changes))
+
+
+def foreign_tags(spec: StackSpec, stack: Stack) -> dict[str, str | None]:
+    """The ownership tags the stack lacks or carries with another value. Empty when re-infra owns it."""
+    return {key: stack.tags.get(key) for key, value in spec.tags.items() if stack.tags.get(key) != value}
 
 
 def _is_destructive(change: ResourceChange) -> bool:

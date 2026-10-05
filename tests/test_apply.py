@@ -67,6 +67,18 @@ def test_rolled_back_stack_is_deleted_before_create(env_config: EnvConfig, fake:
     ]
 
 
+def test_rolled_back_stack_retagged_after_planning_is_not_deleted(env_config: EnvConfig, fake: FakeAws) -> None:
+    fake.stacks.add("rc-env-preview3", status="ROLLBACK_COMPLETE", tags=env_stack_tags("preview3"))
+    plan = build_plan(env_config, fake.aws)
+    fake.stacks.add("rc-env-preview3", status="ROLLBACK_COMPLETE", tags={**env_stack_tags("preview3"), "ManagedBy": "someone-else"})
+
+    result = apply_plan(plan, env_config, fake.aws, log=_quiet)
+
+    assert "rc-env-preview3" in fake.stacks.stacks
+    assert not [e for e in fake.events if "rc-env-preview3" in e]
+    assert any(f.startswith("preview3:") and "not owned by re-infra" in f for f in result.failed)
+
+
 def test_one_failure_does_not_stop_others_and_deletes_run_last(env_config: EnvConfig, fake: FakeAws) -> None:
     add_removed_environment(fake, "preview42")
     fake.stacks.fail_deploy.add("rc-env-preview3")

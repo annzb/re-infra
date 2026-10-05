@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from rc_infra.aws import Aws, ChangeSetKind
 from rc_infra.env_config import EnvConfig
-from rc_infra.planner import Action, ActionKind, Plan, StackSpec, is_halting, refuse_destructive, stack_specs
+from rc_infra.planner import Action, ActionKind, Plan, StackSpec, foreign_tags, is_halting, refuse_destructive, stack_specs
 from rc_infra.teardown import teardown
 from rc_infra.templates import load_template, template_body
 
@@ -68,6 +68,10 @@ def apply_plan(plan: Plan, config: EnvConfig, aws: Aws, log: Callable[[str], Non
 
 def _deploy(action: Action, spec: StackSpec, aws: Aws, log: Callable[[str], None]) -> None:
     if action.replace_failed_stack:
+        # The plan checked ownership, but the stack is read again right before deleting it.
+        stack = aws.stacks.get_stack(action.stack)
+        if stack is not None and (foreign := foreign_tags(spec, stack)):
+            raise RuntimeError(f"{action.stack} is not owned by re-infra (mismatched tags: {foreign}); refusing to delete it")
         log(f"{action.target}: deleting rolled-back stack {action.stack}")
         aws.stacks.delete_stack(action.stack)
 

@@ -1,12 +1,12 @@
 # Resource ownership
 
-This file lists every nontrivial AWS resource behind Retribalize, says which repository owns it, and states its lifecycle. `re-infra` owns resources that outlive a deployment: shared platform resources, identity, and each environment's durable buckets. `retribalize-core` owns the application runtime it deploys into each slot. Core reads every physical identifier it needs from `rc-infra outputs` and never builds one from a naming convention.
+This file lists every nontrivial AWS resource behind Retribalize, says which repository owns it, and states its lifecycle. `re-infra` owns resources that outlive a deployment: shared platform resources and each environment's durable buckets. Identity (Cognito) stays with `retribalize-core`; re-infra only references the existing pools by ID. `retribalize-core` owns the application runtime it deploys into each slot. Core reads every physical identifier it needs from `rc-infra outputs` and never builds one from a naming convention.
 
 ## Categories
 
 | Category | Meaning | Lifecycle |
 |---|---|---|
-| **platform-shared** | One per account, used by every environment (ECR, shared execution role, identity) | Retain; never replaced; changed only through `rc-infra apply` |
+| **platform-shared** | One per account, used by every environment (ECR, shared execution role) | Retain; never replaced; changed only through `rc-infra apply` |
 | **persistence-environment** | Durable data belonging to one environment/slot (buckets; DynamoDB tables) | Created when the env is added to `envs.yaml`; Retain; deleted only when the env is removed |
 | **application-slot** | Created and destroyed with one core app stack `rc-app-<slot>` | Owned by core's SAM template; safe to replace |
 | **deployment-pipeline** | Build/deploy machinery (CodeBuild, artifact/cache buckets, deploy locks) | Core today; AWS-native CI/CD deferred |
@@ -21,12 +21,11 @@ This file lists every nontrivial AWS resource behind Retribalize, says which rep
 | rc-platform | `ApiImageRepository` (ECR, `rc-api-v2`, no lifecycle) | platform-shared |
 | rc-platform | `MatchingImageRepository` (ECR, `rc-matching-v2`, no lifecycle) | platform-shared |
 | rc-platform | `SharedLambdaExecutionRole` (IAM::Role, generated name, PowerUserAccess) -> `SharedLambdaExecutionRoleArn` | platform-shared |
-| rc-identity (`infra/identity.yaml`) | `{Prod,Staging,Dev,Preview}UserPool` (Cognito, `rc-<profile>-user-pool-v3`) | platform-shared |
-| rc-identity | `{Prod,Staging,Dev,Preview}UserPoolClient` (no secret, COGNITO only) | platform-shared |
-| rc-identity | `{Prod,Staging,Dev,Preview}UserPoolDomain` (`rc-<profile>-v3`) | platform-shared |
-| rc-env-&lt;env&gt; (`infra/environment.yaml`) | `EmbeddingsBucket`, `UserCorpusBucket` (uploads/ 7d), `AvatarsBucket` (public), `RecordingsBucket`, `SchemaDumpsBucket` (30d), `PropertyRegistryBucket` (versioned); all S3, generated names, outputs `<Logical>Name`/`<Logical>Arn` | persistence-environment |
+| rc-env-&lt;env&gt; (`infra/environment.yaml`) | `EmbeddingsBucket`, `UserCorpusBucket` (uploads/ 7d), `AvatarsBucket` (public; `AvatarsBucketPolicy` grants read on six image prefixes only), `RecordingsBucket`, `SchemaDumpsBucket` (30d), `PropertyRegistryBucket` (versioned, bucket key); all S3, generated names, outputs `<Logical>Name`/`<Logical>Arn` | persistence-environment |
 
-Every resource above is `Retain`. One `rc-env-<env>` stack exists per `envs.yaml` entry (prod, staging, dev, preview1-8, preview67, preview89). Each slot gets its own buckets.
+Every resource above is `RetainExceptOnCreate`: kept on deletion, removed only by the rollback of its own first create. One `rc-env-<env>` stack exists per `envs.yaml` entry (prod, staging, dev, preview1-8, preview67, preview89). Each slot gets its own buckets.
+
+> **Comment from LLM:** `infra/identity.yaml` (Cognito pools as a stack) and `infra/pipeline.yaml` (CodeBuild projects, role, artifact/cache buckets, lock table) are in the repository but deliberately **not deployed**, for simplicity; they are kept in case they are wanted later. The same goes for `python_packages/rc_identity`.
 
 ## retribalize-core resources
 
@@ -46,12 +45,12 @@ Line numbers are approximate and point into `backend/template-v2.yaml` unless an
 | 8 `Schedule` events (EventBridge rules via SAM) | application-slot | core | |
 | 6 `AWS::Lambda::Permission`: PostSignup (~803), UserMigration (~868), 3 Presence (~2536-2556), `MatchingContributionsS3Permission` (~4721) | application-slot | core | The S3 permission's `SourceArn` is built from the `UserCorpusBucket` mapping value. The two Cognito permissions use the `CognitoUserPoolId` parameter |
 | User-corpus S3 notifications (`backend/scripts/setup_corpus_triggers.py`, run from `deployment/buildspec-deploy.yml` ~276) | application-slot | core | Writes notification config onto a re-infra bucket. It has to merge per slot only because buckets are shared today; with per-slot buckets it can own the whole config |
-| Cognito triggers (pool `LambdaConfig`) | platform-shared wiring | deferred (re-infra) | The v3 pools have no `LambdaConfig`. Core owns the functions and permissions |
-| DynamoDB tables `rc-<env>-*` (`deploy_dynamo_tables.py`, via `rc_dynamo` schema sync) | persistence-environment | core | Decision D3. `ensure_deployment_lock_table.py` creates `rc-deployment-locks` (deployment-pipeline) |
+| Cognito pools, clients, domains, providers and triggers (the live `rc-<tier>-user-pool-v2` pools) | identity | core / by hand | Not managed by re-infra. `envs.yaml` references the pool, client and domain IDs; `rc-infra outputs` passes them on |
+| DynamoDB tables `rc-<env>-*` today, `rc2-<env>-*` in the new generation (`deploy_dynamo_tables.py`, via `rc_dynamo` schema sync) | persistence-environment | core | Decision D3. `ensure_deployment_lock_table.py` creates `rc-deployment-locks` (deployment-pipeline) |
 | Schema dump bucket (`deploy_dynamo_tables.py` ~361, creates on demand; falls back to `EMBEDDINGS_BUCKET` ~792) | persistence-environment | re-infra (`SchemaDumpsBucket`) | Core should stop calling `create_bucket` |
 | `infra/ecr.yaml` stack `rc-ecr`: `rc-api`, `rc-matching` + 7 per-function `rc-matching-*` repos | platform-shared | re-infra (`rc-api-v2`, `rc-matching-v2`); old repos retire | Retire once no slot runs an image from them. Also `prepare_ecr_catalog.py`, `resolve_image_repositories.py` |
 | `infra/codebuild.yaml` stack `rc-codebuild`: `CodeBuildRole` (`rc-codebuild-deploy`), `rc-build`, `rc-deploy-{dev,staging,prod,preview}`, `ArtifactsBucket`, `CacheBucket` | deployment-pipeline | deferred (core for now) | `prepare_codebuild_infrastructure.py`. `CacheBucket` has a literal name (~227) |
-| `backend/scripts/create-cognito-pools.sh` (v2 pools, domains, IdPs, clients, triggers) | legacy/retire | retire | Replaced by rc-identity. Contains secrets, see below |
+| `backend/scripts/create-cognito-pools.sh` (v2 pools, domains, IdPs, clients, triggers) | legacy/retire | retire | The pools it created are the live ones; keep them, retire the script. Contains secrets, see below |
 | `backend/scripts/create-durable-persistence.sh` (users/messages/query-history tables; embeddings/avatars/user-corpus buckets) | legacy/retire | retire | Bucket half replaced by rc-env-&lt;env&gt;; table half by schema sync |
 | `backend/scripts/create-property-registry-bucket.sh` | legacy/retire | retire | Replaced by `PropertyRegistryBucket` |
 | `backend/scout-standalone.yaml`, `backend/tenet-pipelines-standalone.yaml` | legacy/retire | retire | Standalone test stacks. The tenet one has 12 `LambdaPower` roles and the `retribalize-users`/`retribalize-embeddings` names |
@@ -81,22 +80,21 @@ Line numbers are approximate and point into `backend/template-v2.yaml` unless an
 
 1. **Rotate or revoke** the client secret for all three providers in each provider's console (Google Cloud, Discord developer portal, LinkedIn developer portal). Assume they are compromised.
 2. **Store** the new credentials in Secrets Manager, one secret per provider, with a JSON body `{client_id, client_secret}`.
-3. **Remove** the script from core. rc-identity replaces it. If the script is kept, it must read from Secrets Manager.
-4. **Update** the identity providers on the live v2 pools to use the new secrets until those pools retire.
+3. **Remove** the script from core. If it is kept, it must read from Secrets Manager.
+4. **Update** the identity providers on the live v2 pools to use the new secrets.
 5. **Consider a history scrub** (`git filter-repo`, then a force-push and fresh clones). Rotation is what actually closes the exposure. A scrub only removes the old values from history.
 
 ## Decisions
 
-- **D1: every slot is its own persistence lineage.** Each `envs.yaml` entry gets its own `rc-env-<slot>` stack with its own six buckets, and its own `rc-<slot>-*` tables. No durable resource is shared between slots; only identity is shared, through identity profiles (all previews use `preview`).
-- **D3: DynamoDB tables stay in core.** `rc_dynamo` schema sync creates and migrates `rc-<slot>-*` tables from core's table models. `re-infra` declares no tables; it only reports on and tears down tables tagged `ManagedBy=rc-dynamo-sync`.
-- **D4: fresh physical names, read from outputs.** Buckets and the shared role have CloudFormation-generated names. ECR repositories (`rc-lambda-base`, `rc-api-v2`, `rc-matching-v2`) and Cognito pools/domains (`-v3`) have fixed names that no earlier generation uses. Every consumer reads identifiers from `rc-infra outputs` or the stack outputs, never from a naming convention.
+- **D1: every slot is its own persistence lineage.** Each `envs.yaml` entry gets its own `rc-env-<slot>` stack with its own six buckets, and its own `rc2-<slot>-*` tables. No durable resource is shared between slots; only identity is shared, through identity profiles (all previews use `preview`).
+- **D3: DynamoDB tables stay in core.** `rc_dynamo` schema sync creates and migrates tables from core's table models under the contract's `data.table_prefix` (`rc2-<slot>-`, data generation 2, which can never match an old `rc-<slot>-*` table). `re-infra` declares no tables; it reports on tables tagged `ManagedBy=rc-dynamo-sync` and refuses an environment teardown until core has deleted them.
+- **D4: fresh physical names, read from outputs.** Buckets and the shared role have CloudFormation-generated names. ECR repositories (`rc-lambda-base`, `rc-api-v2`, `rc-matching-v2`) have fixed names that no earlier generation uses. Every consumer reads identifiers from `rc-infra outputs` or the stack outputs, never from a naming convention.
 
 ## Open decisions
 
-- **D2: Cognito user migration.** The v3 pools are new and empty, and prod v2 has about 7k users. The options are a forced password reset, or a first-login `UserMigration` trigger that authenticates against the v2 pool. A trigger lets most users carry over without noticing; a reset is simpler. Either way, `SignupFanoutFunction`/`FANOUT_TARGETS` (cross-pool replication) must be reconsidered.
-- **D5: identity providers in CloudFormation.** Declare `UserPoolIdentityProvider` with `{{resolve:secretsmanager:...}}` for `client_secret`, after the rotation above. Until then the v3 clients support only `COGNITO`, so social login is a regression on cutover.
+- **D2: identity stays in core.** The existing pools keep every account and password; re-infra references them by ID and does not manage them, so there is no user migration. Moving identity here later is possible (`infra/identity.yaml`, `rc_identity`, kept but unused).
+- **D7: CodeBuild not provisioned here.** Images may all be built in GitHub Actions; core keeps its `rc-codebuild` stack meanwhile (`infra/pipeline.yaml` kept but unused).
 - **D6: base package distribution.** How core consumes `rc_dynamo` and the `rc-lambda-base` image (registry package vs. image parent vs. vendoring), and which tag core pins.
-- **Trigger wiring.** The v3 pools have no `LambdaConfig`. Someone must decide which slot's `post-signup:live`/`user-migration` functions back the shared preview pool. It is preview1 today. The wiring has to be in the template, because `UpdateUserPool` would otherwise clear it.
 
 ## Core follow-ups under per-slot isolation
 

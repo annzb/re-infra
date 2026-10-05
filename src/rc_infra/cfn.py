@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from botocore.exceptions import ClientError, WaiterError
@@ -65,8 +65,9 @@ class CloudFormationStacks:
         stack_name: str,
         template_body: str,
         tags: Mapping[str, str],
+        parameters: Mapping[str, str] | None = None,
     ) -> list[ResourceChange]:
-        change_set_id, changes = self._create_change_set(stack_name, ChangeSetKind.UPDATE, template_body, tags)
+        change_set_id, changes = self._create_change_set(stack_name, ChangeSetKind.UPDATE, template_body, tags, parameters)
         if change_set_id:
             self._cfn.delete_change_set(ChangeSetName=change_set_id)
         return changes
@@ -77,10 +78,18 @@ class CloudFormationStacks:
         kind: ChangeSetKind,
         template_body: str,
         tags: Mapping[str, str],
+        guard: Callable[[list[ResourceChange]], None] | None = None,
+        parameters: Mapping[str, str] | None = None,
     ) -> list[ResourceChange]:
-        change_set_id, changes = self._create_change_set(stack_name, kind, template_body, tags)
+        change_set_id, changes = self._create_change_set(stack_name, kind, template_body, tags, parameters)
         if not change_set_id:
             return []
+        if guard is not None:
+            try:
+                guard(changes)
+            except Exception:
+                self._cfn.delete_change_set(ChangeSetName=change_set_id)
+                raise
         self._cfn.execute_change_set(ChangeSetName=change_set_id)
         try:
             self._cfn.get_waiter(_WAITERS[kind]).wait(  # type: ignore[call-overload]
@@ -108,6 +117,7 @@ class CloudFormationStacks:
         kind: ChangeSetKind,
         template_body: str,
         tags: Mapping[str, str],
+        parameters: Mapping[str, str] | None = None,
     ) -> tuple[str | None, list[ResourceChange]]:
         kwargs: dict[str, Any] = {
             "StackName": stack_name,
@@ -117,6 +127,8 @@ class CloudFormationStacks:
             "Tags": [{"Key": key, "Value": value} for key, value in tags.items()],
             "Capabilities": _CAPABILITIES,
         }
+        if parameters:
+            kwargs["Parameters"] = [{"ParameterKey": key, "ParameterValue": value} for key, value in parameters.items()]
 
         change_set_id = self._cfn.create_change_set(**kwargs)["Id"]
         try:

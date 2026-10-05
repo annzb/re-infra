@@ -135,41 +135,79 @@ class FakeVersion:
     metadata: dict[str, str] = field(default_factory=dict)
     tags: dict[str, str] = field(default_factory=dict)
     last_modified: datetime = field(default_factory=lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    delete_marker: bool = False
 
 
 @dataclass
 class FakeBucket:
     versioning: str | None = None
-    # Key -> versions, oldest first. The last one is current.
+    # Key -> versions and delete markers, oldest first. The last one is current,
+    # unless it is a delete marker, in which case the key has no current object.
     objects: dict[str, list[FakeVersion]] = field(default_factory=dict)
-    delete_markers: int = 0
+
+
+class _Body:
+    def __init__(self, data: bytes) -> None:
+        self._data, self._offset = data, 0
+
+    def read(self, size: int = -1) -> bytes:
+        end = len(self._data) if size < 0 else self._offset + size
+        chunk, self._offset = self._data[self._offset : end], min(end, len(self._data))
+        return chunk
 
 
 @dataclass
 class FakeS3:
+    """S3 with real versioning semantics: an unversioned bucket keeps one version
+    ("null") per key, a versioned one keeps history, and deleting a key in a versioned
+    bucket adds a delete marker that hides it."""
+
     buckets: dict[str, FakeBucket] = field(default_factory=dict)
     copies: list[tuple[str, str]] = field(default_factory=list)
+    deletes: list[str] = field(default_factory=list)
     fail_copy: set[str] = field(default_factory=set)
     _counter: int = 0
 
-    def put(self, bucket: str, key: str, body: bytes = b"x", **kwargs: Any) -> None:
+    def _next(self) -> tuple[str, datetime]:
         self._counter += 1
-        versions = self.buckets[bucket].objects.setdefault(key, [])
-        when = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=self._counter)
-        versions.append(FakeVersion(f"v{self._counter}", body, last_modified=when, **kwargs))
+        return f"v{self._counter}", datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=self._counter)
+
+    def put(self, bucket: str, key: str, body: bytes = b"x", **kwargs: Any) -> str:
+        version_id, when = self._next()
+        target = self.buckets[bucket]
+        if target.versioning != "Enabled":
+            version_id = "null"
+            target.objects[key] = []
+        target.objects.setdefault(key, []).append(FakeVersion(version_id, body, last_modified=when, **kwargs))
+        return version_id
+
+    def delete(self, bucket: str, key: str) -> str | None:
+        target = self.buckets[bucket]
+        if target.versioning != "Enabled":
+            target.objects.pop(key, None)
+            return None
+        version_id, when = self._next()
+        target.objects.setdefault(key, []).append(FakeVersion(version_id, b"", last_modified=when, delete_marker=True))
+        return version_id
 
     def _bucket(self, name: str) -> FakeBucket:
         if name not in self.buckets:
             raise _not_found("HeadBucket", "404")
         return self.buckets[name]
 
+    def _current(self, bucket: str) -> dict[str, FakeVersion]:
+        return {key: history[-1] for key, history in self._bucket(bucket).objects.items() if history and not history[-1].delete_marker}
+
     def _version(self, bucket: str, key: str, version_id: str | None) -> FakeVersion:
-        versions = self._bucket(bucket).objects.get(key)
-        if not versions:
-            raise _not_found("HeadObject", "404")
+        history = self._bucket(bucket).objects.get(key) or []
         if version_id is None:
-            return versions[-1]
-        return next(v for v in versions if v.version_id == version_id)
+            if not history or history[-1].delete_marker:
+                raise _not_found("HeadObject", "404")
+            return history[-1]
+        found = next((v for v in history if v.version_id == version_id and not v.delete_marker), None)
+        if found is None:
+            raise _not_found("HeadObject", "404")
+        return found
 
     def head_bucket(self, Bucket: str) -> dict[str, Any]:
         self._bucket(Bucket)
@@ -180,36 +218,51 @@ class FakeS3:
         return {"Status": status} if status else {}
 
     def list_objects_v2(self, Bucket: str, MaxKeys: int | None = None, ContinuationToken: str | None = None) -> dict[str, Any]:
-        keys = sorted(self._bucket(Bucket).objects)
+        current = self._current(Bucket)
+        keys = sorted(current)
         start = int(ContinuationToken or 0)
         size = min(MaxKeys or 2, 2)
         page = keys[start : start + size]
-        response: dict[str, Any] = {
-            "KeyCount": len(page),
-            "Contents": [{"Key": key, "Size": len(self._version(Bucket, key, None).body)} for key in page],
-        }
+        response: dict[str, Any] = {"KeyCount": len(page), "Contents": [{"Key": key, "Size": len(current[key].body)} for key in page]}
         if start + size < len(keys):
             response["NextContinuationToken"] = str(start + size)
         return response
 
-    def list_object_versions(self, Bucket: str, MaxKeys: int | None = None, **_: Any) -> dict[str, Any]:
+    def list_object_versions(self, Bucket: str, MaxKeys: int | None = None, KeyMarker: str | None = None, **_: Any) -> dict[str, Any]:
         bucket = self._bucket(Bucket)
-        versions = [
-            {"Key": key, "VersionId": v.version_id, "Size": len(v.body), "LastModified": v.last_modified}
-            for key, history in sorted(bucket.objects.items())
-            for v in reversed(history)
-        ]
-        markers = [{"Key": "deleted", "VersionId": f"dm{i}"} for i in range(bucket.delete_markers)]
+        keys = sorted(key for key in bucket.objects if KeyMarker is None or key > KeyMarker)
+        page_keys = keys[:2]
+        versions, markers = [], []
+        for key in page_keys:
+            history = bucket.objects[key]
+            for index, v in reversed(list(enumerate(history))):
+                entry = {"Key": key, "VersionId": v.version_id, "LastModified": v.last_modified, "IsLatest": index == len(history) - 1}
+                if v.delete_marker:
+                    markers.append(entry)
+                else:
+                    versions.append({**entry, "Size": len(v.body)})
         if MaxKeys:
-            versions, markers = versions[:MaxKeys], markers[: max(0, MaxKeys - len(versions))]
-        return {"Versions": versions, "DeleteMarkers": markers, "IsTruncated": False}
+            return {"Versions": versions[:MaxKeys], "DeleteMarkers": markers[: max(0, MaxKeys - len(versions))], "IsTruncated": False}
+        truncated = len(keys) > 2
+        response: dict[str, Any] = {"Versions": versions, "DeleteMarkers": markers, "IsTruncated": truncated}
+        if truncated:
+            response.update(NextKeyMarker=page_keys[-1], NextVersionIdMarker="x")
+        return response
 
     def head_object(self, Bucket: str, Key: str, VersionId: str | None = None) -> dict[str, Any]:
         version = self._version(Bucket, Key, VersionId)
-        return {"ContentLength": len(version.body), "Metadata": dict(version.metadata), **version.headers}
+        return {"ContentLength": len(version.body), "Metadata": dict(version.metadata), "VersionId": version.version_id, **version.headers}
+
+    def get_object(self, Bucket: str, Key: str, VersionId: str | None = None) -> dict[str, Any]:
+        return {"Body": _Body(self._version(Bucket, Key, VersionId).body)}
 
     def get_object_tagging(self, Bucket: str, Key: str, VersionId: str | None = None) -> dict[str, Any]:
         return {"TagSet": [{"Key": k, "Value": v} for k, v in self._version(Bucket, Key, VersionId).tags.items()]}
+
+    def delete_object(self, Bucket: str, Key: str) -> dict[str, Any]:
+        self.deletes.append(Key)
+        version_id = self.delete(Bucket, Key)
+        return {"VersionId": version_id, "DeleteMarker": True} if version_id else {}
 
     def copy(self, CopySource: dict[str, str], Bucket: str, Key: str, ExtraArgs: dict[str, Any]) -> None:
         if Key in self.fail_copy:

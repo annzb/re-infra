@@ -1,0 +1,623 @@
+AWSTemplateFormatVersion: "2010-09-09"
+# ── Comment from LLM (plan2 rollback, 2026-10-05) ───────────────────────────────
+# NOT DEPLOYED. `rc-infra apply` deploys only rc-platform and the rc-env-* stacks
+# (src/rc_infra/planner.py, stack_specs). This template is kept in the repository in
+# case it is wanted later, and is deliberately ignored for simplicity: images,
+# core's included, may all be built in GitHub Actions, so CodeBuild is not provisioned
+# here; core keeps using its own rc-codebuild stack for now.
+# ─────────────────────────────────────────────────────────────────────────────────
+Description: >
+  Retribalize build and deploy machinery (stack rc-pipeline): the CodeBuild
+  projects retribalize-core runs its buildspecs in, their role, the build
+  artifact and cache buckets, and the deployment lock table. Deployed by
+  `rc-infra apply`; do not deploy by hand.
+
+# Conventions (rc-infra parses this file with yaml.safe_load):
+#   - Long-form intrinsics only (Fn::GetAtt with a list, Ref, Fn::Sub), never !Sub.
+#   - A fresh generation beside core's rc-codebuild stack: project names carry -v2,
+#     buckets, the role and the table have generated names. Nothing here refers to
+#     an rc-codebuild resource, so both can run side by side until core switches.
+#   - This stack owns the projects, not what they run: the buildspecs and every
+#     command in them are retribalize-core's. Source repository, connection and
+#     buildspec paths are parameters (envs.yaml `pipeline:`).
+#   - The role reaches environment resources only through re-infra's generated
+#     names (rc-env-*), never an earlier generation's (rc-<env>-*-<account>).
+#   - Everything is RetainExceptOnCreate: a rollback of the first create removes it,
+#     a stack deletion never removes artifacts a deployed template still points at.
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W1100  # YAML merge keys: resolved at parse time, never sent to CloudFormation
+        - W1101  # YAML aliases: same
+
+Parameters:
+  SourceRepository:
+    Type: String
+    Description: HTTPS clone URL of retribalize-core.
+  SourceConnectionArn:
+    Type: String
+    Default: ""
+    Description: >
+      A CodeConnections connection to pull source through. Empty (like core's
+      rc-build today) uses the account's default GitHub source credential.
+  BuildSpecBuild:
+    Type: String
+    Default: deployment/buildspec-build.yml
+  BuildSpecDeploy:
+    Type: String
+    Default: deployment/buildspec-deploy.yml
+  VercelScope:
+    Type: String
+  VercelTokenSecretName:
+    Type: String
+    Description: Secrets Manager secret holding the Vercel token (value supplied by an operator).
+  PushWebhooks:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >
+      Deploy staging and prod on every push to core's staging and main branches, as
+      rc-codebuild's projects do. Off until cutover: with both generations listening,
+      one push would start two deployments of the same application stack.
+
+Conditions:
+  UseConnection:
+    Fn::Not: [Fn::Equals: [Ref: SourceConnectionArn, ""]]
+  UsePushWebhooks:
+    Fn::Equals: [Ref: PushWebhooks, "true"]
+
+Resources:
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: What retribalize-core's CodeBuild projects run as.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+          Condition:
+            StringEquals:
+              aws:SourceAccount:
+                Ref: AWS::AccountId
+      Policies:
+      - PolicyName: rc-pipeline-codebuild
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Sid: Logs
+            Effect: Allow
+            Action: logs:*
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*
+          - Sid: BuildArtifactsAndCache
+            Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:ListBucket
+            - s3:GetBucketLocation
+            Resource:
+            - Fn::GetAtt: [ArtifactsBucket, Arn]
+            - Fn::Sub: "${ArtifactsBucket.Arn}/*"
+            - Fn::GetAtt: [CacheBucket, Arn]
+            - Fn::Sub: "${CacheBucket.Arn}/*"
+          # Deploy-time data steps (backfills, corpus index) read and write the
+          # environment's own buckets.
+          - Sid: EnvironmentBuckets
+            Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:ListBucket
+            - s3:GetBucketLocation
+            Resource:
+            - arn:aws:s3:::rc-env-*
+            - arn:aws:s3:::rc-env-*/*
+          # setup_corpus_triggers.py wires the user-corpus bucket to core's functions.
+          - Sid: CorpusNotifications
+            Effect: Allow
+            Action:
+            - s3:GetBucketNotification
+            - s3:PutBucketNotification
+            Resource: arn:aws:s3:::rc-env-*-usercorpusbucket-*
+          - Sid: SamDeploy
+            Effect: Allow
+            Action:
+            - cloudformation:CreateChangeSet
+            - cloudformation:ExecuteChangeSet
+            - cloudformation:DescribeChangeSet
+            - cloudformation:DeleteChangeSet
+            - cloudformation:DescribeStacks
+            - cloudformation:DescribeStackEvents
+            - cloudformation:GetTemplate
+            - cloudformation:GetTemplateSummary
+            - cloudformation:ListStackResources
+            - cloudformation:UpdateStack
+            - cloudformation:CreateStack
+            - cloudformation:TagResource
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rc-app-*/*
+            - Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+          # Read-only access to re-infra's stacks: the deployment contract (rc-infra outputs).
+          - Sid: ReadContract
+            Effect: Allow
+            Action:
+            - cloudformation:DescribeStacks
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rc-platform/*
+            - Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rc-identity/*
+            - Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rc-pipeline/*
+            - Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/rc-env-*/*
+          - Sid: ValidateTemplate
+            Effect: Allow
+            Action: cloudformation:ValidateTemplate
+            Resource: "*"
+          # The services the application stack is made of.
+          - Sid: AppServices
+            Effect: Allow
+            Action:
+            - lambda:*
+            - apigateway:*
+            - dynamodb:*
+            - states:*
+            - events:*
+            - sqs:*
+            - sns:*
+            - cloudfront:*
+            Resource: "*"
+          # Core wires its functions into the shared pools' Lambda permissions only;
+          # it never edits a pool (rc-identity owns them).
+          - Sid: CognitoRead
+            Effect: Allow
+            Action:
+            - cognito-idp:Describe*
+            - cognito-idp:List*
+            - cognito-idp:Get*
+            Resource: "*"
+          - Sid: AppSecrets
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: "*"
+          - Sid: SamRoles
+            Effect: Allow
+            Action:
+            - iam:GetRole
+            - iam:PassRole
+            - iam:CreateRole
+            - iam:DeleteRole
+            - iam:AttachRolePolicy
+            - iam:DetachRolePolicy
+            - iam:PutRolePolicy
+            - iam:DeleteRolePolicy
+            - iam:GetRolePolicy
+            - iam:TagRole
+            - iam:UntagRole
+            - iam:ListRolePolicies
+            - iam:ListAttachedRolePolicies
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*
+          - Sid: SourceConnection
+            Effect:
+              Fn::If: [UseConnection, Allow, Deny]
+            Action:
+            - codestar-connections:UseConnection
+            - codestar-connections:GetConnection
+            - codestar-connections:GetConnectionToken
+            - codeconnections:UseConnection
+            - codeconnections:GetConnection
+            - codeconnections:GetConnectionToken
+            Resource:
+              Fn::If: [UseConnection, Ref: SourceConnectionArn, "*"]
+          - Sid: EcrLogin
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: "*"
+          # Push and inspect application images; never create, delete or repolicy a
+          # repository (rc-platform owns them). The base image is read-only here.
+          - Sid: EcrPush
+            Effect: Allow
+            Action:
+            - ecr:BatchCheckLayerAvailability
+            - ecr:BatchGetImage
+            - ecr:CompleteLayerUpload
+            - ecr:DescribeImages
+            - ecr:DescribeRepositories
+            - ecr:GetDownloadUrlForLayer
+            - ecr:InitiateLayerUpload
+            - ecr:ListImages
+            - ecr:PutImage
+            - ecr:UploadLayerPart
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/rc-api-v2
+            - Fn::Sub: arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/rc-matching-v2
+          - Sid: EcrPullBase
+            Effect: Allow
+            Action:
+            - ecr:BatchCheckLayerAvailability
+            - ecr:BatchGetImage
+            - ecr:DescribeImages
+            - ecr:GetDownloadUrlForLayer
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/rc-lambda-base
+          - Sid: DeploymentLocks
+            Effect: Allow
+            Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:DeleteItem
+            - dynamodb:DescribeTable
+            Resource:
+              Fn::GetAtt: [DeploymentLockTable, Arn]
+
+  # The handoff between build and deploy. builds/ (the packaged template and its
+  # manifest) is read once by the deployment right after it and expires; sam/ (the
+  # code artifacts packaged templates point at) never does, because a rollback
+  # re-reads the previous deployment's artifacts however long ago that was.
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+        - Id: expire-build-handoff
+          Status: Enabled
+          Prefix: builds/
+          ExpirationInDays: 14
+
+  # The build stage's SAM/Docker layer cache. Disposable.
+  CacheBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+        - Id: expire-cache
+          Status: Enabled
+          ExpirationInDays: 14
+
+  # One row per lock key (deployment:<family> or a stack name), reused in place;
+  # an expired lease is reclaimed by a conditional write, so there is no TTL.
+  # Transient: no need to migrate leases from rc-deployment-locks.
+  DeploymentLockTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: lockKey
+        AttributeType: S
+      KeySchema:
+      - AttributeName: lockKey
+        KeyType: HASH
+      SSESpecification:
+        SSEEnabled: false
+      DeletionProtectionEnabled: true
+
+  # One build for every target: it tests and packages a commit and mutates nothing
+  # environment-specific. It deliberately sets no DEPLOYMENT_ENVIRONMENT, so a bare
+  # start-build fails the buildspec's guard instead of guessing an environment.
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: rc-build-v2
+      Description: Test and package a commit; produces the artifact the deploy projects consume
+      ServiceRole:
+        Fn::GetAtt: [CodeBuildRole, Arn]
+      TimeoutInMinutes: 60
+      Source: &source
+        Type: GITHUB
+        Location:
+          Ref: SourceRepository
+        BuildSpec:
+          Ref: BuildSpecBuild
+        GitCloneDepth: 1
+        Auth:
+          Fn::If:
+          - UseConnection
+          - Type: CODECONNECTIONS
+            Resource:
+              Ref: SourceConnectionArn
+          - Ref: AWS::NoValue
+      SourceVersion: refs/heads/main
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:7.0
+        # Docker: the image-packaged Lambdas are built and pushed here.
+        PrivilegedMode: true
+        EnvironmentVariables:
+        - Name: BUILD_ARTIFACTS_BUCKET
+          Value:
+            Ref: ArtifactsBucket
+        - Name: DEPLOYMENT_LOCK_TABLE
+          Value:
+            Ref: DeploymentLockTable
+      Cache:
+        Type: S3
+        Location:
+          Fn::Sub: "${CacheBucket}/build"
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: /codebuild/rc-build-v2
+          StreamName: build
+          Status: ENABLED
+
+  # One deploy project per environment family. DEPLOYMENT_ENVIRONMENT is the only
+  # environment fact each owns; everything else comes from the deployment contract.
+  DevDeployProject:
+    Type: AWS::CodeBuild::Project
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: rc-deploy-dev-v2
+      Description: Deploy a build artifact to dev
+      ServiceRole:
+        Fn::GetAtt: [CodeBuildRole, Arn]
+      TimeoutInMinutes: 60
+      BadgeEnabled: true
+      Source:
+        <<: *source
+        BuildSpec:
+          Ref: BuildSpecDeploy
+        ReportBuildStatus: true
+      SourceVersion: refs/heads/dev
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+        - Name: DEPLOYMENT_ENVIRONMENT
+          Value: dev
+        - Name: VERCEL_TOKEN
+          Type: SECRETS_MANAGER
+          Value:
+            Ref: VercelTokenSecretName
+        - Name: VERCEL_SCOPE
+          Value:
+            Ref: VercelScope
+        - Name: BUILD_ARTIFACTS_BUCKET
+          Value:
+            Ref: ArtifactsBucket
+        - Name: DEPLOYMENT_LOCK_TABLE
+          Value:
+            Ref: DeploymentLockTable
+      Cache:
+        Type: NO_CACHE
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: /codebuild/rc-deploy-v2
+          StreamName: dev
+          Status: ENABLED
+
+  StagingDeployProject:
+    Type: AWS::CodeBuild::Project
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: rc-deploy-staging-v2
+      Description: Deploy a build artifact to staging
+      ServiceRole:
+        Fn::GetAtt: [CodeBuildRole, Arn]
+      TimeoutInMinutes: 60
+      BadgeEnabled: true
+      Triggers:
+        Fn::If:
+        - UsePushWebhooks
+        - Webhook: true
+          BuildType: BUILD
+          FilterGroups:
+          - - Type: EVENT
+              Pattern: PUSH
+            - Type: HEAD_REF
+              Pattern: ^refs/heads/staging$
+        - Ref: AWS::NoValue
+      Source:
+        <<: *source
+        BuildSpec:
+          Ref: BuildSpecDeploy
+        ReportBuildStatus: true
+      SourceVersion: refs/heads/staging
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+        - Name: DEPLOYMENT_ENVIRONMENT
+          Value: staging
+        - Name: VERCEL_TOKEN
+          Type: SECRETS_MANAGER
+          Value:
+            Ref: VercelTokenSecretName
+        - Name: VERCEL_SCOPE
+          Value:
+            Ref: VercelScope
+        - Name: BUILD_ARTIFACTS_BUCKET
+          Value:
+            Ref: ArtifactsBucket
+        - Name: DEPLOYMENT_LOCK_TABLE
+          Value:
+            Ref: DeploymentLockTable
+      Cache:
+        Type: NO_CACHE
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: /codebuild/rc-deploy-v2
+          StreamName: staging
+          Status: ENABLED
+
+  ProdDeployProject:
+    Type: AWS::CodeBuild::Project
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: rc-deploy-prod-v2
+      Description: Deploy a build artifact to prod
+      ServiceRole:
+        Fn::GetAtt: [CodeBuildRole, Arn]
+      TimeoutInMinutes: 60
+      BadgeEnabled: true
+      Triggers:
+        Fn::If:
+        - UsePushWebhooks
+        - Webhook: true
+          BuildType: BUILD
+          FilterGroups:
+          - - Type: EVENT
+              Pattern: PUSH
+            - Type: HEAD_REF
+              Pattern: ^refs/heads/main$
+        - Ref: AWS::NoValue
+      Source:
+        <<: *source
+        BuildSpec:
+          Ref: BuildSpecDeploy
+        ReportBuildStatus: true
+      SourceVersion: refs/heads/main
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+        - Name: DEPLOYMENT_ENVIRONMENT
+          Value: prod
+        - Name: VERCEL_TOKEN
+          Type: SECRETS_MANAGER
+          Value:
+            Ref: VercelTokenSecretName
+        - Name: VERCEL_SCOPE
+          Value:
+            Ref: VercelScope
+        - Name: BUILD_ARTIFACTS_BUCKET
+          Value:
+            Ref: ArtifactsBucket
+        - Name: DEPLOYMENT_LOCK_TABLE
+          Value:
+            Ref: DeploymentLockTable
+      Cache:
+        Type: NO_CACHE
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: /codebuild/rc-deploy-v2
+          StreamName: prod
+          Status: ENABLED
+
+  PreviewDeployProject:
+    Type: AWS::CodeBuild::Project
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: rc-deploy-preview-v2
+      Description: Deploy a build artifact to a preview slot
+      ServiceRole:
+        Fn::GetAtt: [CodeBuildRole, Arn]
+      TimeoutInMinutes: 60
+      Source:
+        <<: *source
+        BuildSpec:
+          Ref: BuildSpecDeploy
+      SourceVersion: refs/heads/main
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+        - Name: DEPLOYMENT_ENVIRONMENT
+          Value: preview
+        # Default slot for a bare start-build; core's deploy entry point overrides it.
+        - Name: SLOT
+          Value: preview1
+        - Name: VERCEL_TOKEN
+          Type: SECRETS_MANAGER
+          Value:
+            Ref: VercelTokenSecretName
+        - Name: VERCEL_SCOPE
+          Value:
+            Ref: VercelScope
+        - Name: BUILD_ARTIFACTS_BUCKET
+          Value:
+            Ref: ArtifactsBucket
+        - Name: DEPLOYMENT_LOCK_TABLE
+          Value:
+            Ref: DeploymentLockTable
+      Cache:
+        Type: NO_CACHE
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: /codebuild/rc-deploy-v2
+          StreamName: preview
+          Status: ENABLED
+
+Outputs:
+  CodeBuildRoleArn:
+    Value:
+      Fn::GetAtt: [CodeBuildRole, Arn]
+  ArtifactsBucketName:
+    Value:
+      Ref: ArtifactsBucket
+  CacheBucketName:
+    Value:
+      Ref: CacheBucket
+  DeploymentLockTableName:
+    Value:
+      Ref: DeploymentLockTable
+  BuildProjectName:
+    Value:
+      Ref: BuildProject
+  DevDeployProjectName:
+    Value:
+      Ref: DevDeployProject
+  StagingDeployProjectName:
+    Value:
+      Ref: StagingDeployProject
+  ProdDeployProjectName:
+    Value:
+      Ref: ProdDeployProject
+  PreviewDeployProjectName:
+    Value:
+      Ref: PreviewDeployProject

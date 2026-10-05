@@ -67,9 +67,11 @@ class Settings:
     # integration tests drop this to 1s.
     schema_poll_seconds: float = 10.0
     schema_wait_timeout_seconds: float = 3600.0
-    # Destructive schema-sync permissions. Both stay off unless there is a reason.
+    # Destructive schema-sync permissions. All stay off unless there is a reason.
     prune_undeclared: bool = False
     allow_table_recreate: bool = False
+    # Disabling PITR or deletion protection on a live table, as declared.
+    allow_protection_downgrade: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -92,4 +94,5 @@ class Settings:
             ),
             prune_undeclared=parse_bool(env, "DYNAMO_PRUNE_UNDECLARED", False),
             allow_table_recreate=parse_bool(env, "DYNAMO_ALLOW_TABLE_RECREATE", False),
+            allow_protection_downgrade=parse_bool(env, "DYNAMO_ALLOW_PROTECTION_DOWNGRADE", False),
         )

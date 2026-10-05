@@ -76,7 +76,7 @@ One `docker compose build` produces the base image and the test image as a singl
 | `main.yml` | push to `main` | Entry point; orders validate, infrastructure, images | None of its own; grants OIDC to the jobs it calls. |
 | `non-main.yml` | push to any other branch | Entry point; validation and image build/test only | None. |
 | `validate.yml` | `workflow_call` | Lint, type-check, test, `cfn-lint`, `rc-infra validate` | None. |
-| `deploy-infra.yml` | `workflow_call` | Applies `infra/*.yaml` for `envs.yaml`: reconciles `rc-platform`, `rc-identity` and `rc-env-*`, and tears down environments removed from `envs.yaml` | Main only, using the GitHub role. |
+| `deploy-infra.yml` | `workflow_call` | Applies `infra/*.yaml` for `envs.yaml`: reconciles `rc-platform` and `rc-env-*`, and tears down environments removed from `envs.yaml` | Main only, using the GitHub role. |
 | `deploy-images.yml` | `workflow_call` | Builds, tests and publishes the Lambda base image in one job | Every branch pushes its own tag using the GitHub role. |
 
 A called workflow must never declare the same concurrency group as its caller: GitHub reports that as a deadlock and cancels the run. Serialization therefore lives entirely in the entry points, which own `re-infra-<ref>`; `main.yml` sets `cancel-in-progress: false` so an apply already in flight is never cancelled, while `non-main.yml` replaces superseded branch runs. None of the three called workflows declares a group of its own.
@@ -88,14 +88,16 @@ Moving this orchestration into AWS (CodeBuild, CodePipeline, EventBridge or simi
 | Stack/resource | Owner | Contents |
 |---|---|---|
 | `rc-platform` | This repo | The shared image repositories (`rc-lambda-base`, `rc-api-v2`, `rc-matching-v2`) and the shared Lambda execution role. |
-| `rc-identity` | This repo | One Cognito user pool, app client and hosted UI domain per identity profile. See [`infra/identity.md`](infra/identity.md). |
 | `rc-env-<name>` | This repo | The environment's six durable buckets, with CloudFormation-generated names. |
 | `rc-app-<name>` | `retribalize-core` | Application-specific SAM/CloudFormation resources. |
-| DynamoDB application tables | `rc-dynamo-sync` from `retribalize-core` | Application table schemas and migrations; not owned by these CloudFormation templates. |
+| Cognito user pools, clients, domains, providers, triggers | `retribalize-core` / managed by hand | Not managed here. `envs.yaml` only references them by ID, and `rc-infra outputs` passes those IDs on. |
+| DynamoDB application tables (`rc2-<name>-*`) | `rc-dynamo-sync` from `retribalize-core` | Application table schemas and migrations; not owned by these CloudFormation templates. |
 
-The GitHub OIDC role is deliberately absent from that table: it is provisioned manually (section 9) and owned by no stack here, because the role that deploys the infrastructure cannot also be deployed by it. The Cognito identity providers are absent for a different reason — they carry client secrets, so they stay outside every template for now; see [`infra/identity.md`](infra/identity.md).
+The GitHub OIDC role is deliberately absent from that table: it is provisioned manually (section 9) and owned by no stack here, because the role that deploys the infrastructure cannot also be deployed by it. `apply` deploys `rc-platform` first, then the environments, and only ever updates a stack whose tags say re-infra owns it.
 
-Every physical identifier AWS generates — bucket names, pool and client IDs, the role ARN, repository URIs — is a stack output, never configuration. `rc-infra outputs` prints them (section 4).
+> **Comment from LLM:** `infra/identity.yaml` (Cognito), `infra/pipeline.yaml` (CodeBuild) and `python_packages/rc_identity` are kept in the repository in case they are wanted later, but are deliberately ignored for simplicity: `rc-infra apply` never deploys them and no workflow builds them. Identity stays with `retribalize-core`; images may all be built in GitHub Actions.
+
+Every physical identifier AWS generates — bucket names, the role ARN, repository URIs — is a stack output, never configuration. `rc-infra outputs` prints them (section 4).
 
 This repository does not deploy application code. A successfully created `rc-env-<name>` stack only makes the environment available for a later `retribalize-core` deployment.
 
@@ -103,9 +105,9 @@ This repository does not deploy application code. A successfully created `rc-env
 
 [`envs.yaml`](envs.yaml) is the complete desired list of environments. Because `main` is authoritative, adding an entry creates infrastructure and removing an entry tears that environment down when the change reaches `main`.
 
-> **Warning:** removing an environment deletes its `rc-app-<name>` stack, schema-sync-managed tables, buckets and bucket data, followed by its `rc-env-<name>` stack. `prod`, `staging`, and `dev` are protected from removal by validation, termination protection, and explicit IAM denies.
+> **Warning:** removing an environment deletes its buckets and bucket data, followed by its `rc-env-<name>` stack. re-infra never deletes `retribalize-core`'s `rc-app-<name>` stack or tables: while either still exists, the deletion is `BLOCKED`. `prod`, `staging`, and `dev` are protected from removal by validation, termination protection, and explicit IAM denies.
 
-Every entry is its own persistence lineage: its own `rc-env-<name>` stack and six buckets, and its own `rc-<name>-*` tables once schema sync creates them. Environments share nothing durable; only an identity profile can be shared (all previews use `preview` by default). See [docs/OWNERSHIP.md](docs/OWNERSHIP.md#decisions).
+Every entry is its own persistence lineage: its own `rc-env-<name>` stack and six buckets, and its own `rc2-<name>-*` tables once schema sync creates them. Environments share nothing durable; only an identity profile can be shared (all previews use `preview` by default). See [docs/OWNERSHIP.md](docs/OWNERSHIP.md#decisions).
 
 Never commit secrets to `envs.yaml`, nor identifiers AWS generates: those are read back from stack outputs. API keys, tokens, and client secrets belong in Secrets Manager.
 
@@ -116,7 +118,7 @@ Never commit secrets to `envs.yaml`, nor identifiers AWS generates: those are re
 | `schema_version` | Yes | Configuration schema version; currently must be `1`. |
 | `account_id` | Yes | The 12-digit AWS account. AWS-backed commands refuse credentials for another account. |
 | `region` | Yes | Region used for all managed stacks, for example `us-east-1`. |
-| `identity_profiles` | Yes | Named identity profiles; each is one pool, client and domain in `rc-identity`. Entries carry no settings yet (`prod: {}`). |
+| `identity_profiles.<profile>` | Yes | An existing Cognito pool referenced by its non-secret `user_pool_id`, `client_id` and hosted UI `domain`. Not managed by this repository. |
 | `environments` | Yes | Map of environment names to environment settings. |
 | `environments.<name>.identity` | No | Identity profile name. Defaults to a same-named profile when present, otherwise `preview`. |
 
@@ -146,11 +148,12 @@ Unknown fields are rejected. Environment names must match `^[a-z][a-z0-9]{1,19}$
 
 ### Remove an environment
 
-1. Delete its entry from `envs.yaml`.
-2. Run the dry run above locally and read the `DELETE` action and its inventory carefully. Branch runs have no AWS access, so this is the only preview before the change reaches `main`.
-3. Merge to `main` only when the listed application stack, tables, buckets, and data should be removed.
+1. Have `retribalize-core` delete the environment's `rc-app-<name>` stack and its tables.
+2. Delete its entry from `envs.yaml`.
+3. Run the dry run above locally and read the `DELETE` action and its inventory carefully. Branch runs have no AWS access, so this is the only preview before the change reaches `main`. It is `BLOCKED` while core's stack or tables still exist.
+4. Merge to `main` only when the listed buckets and their data should be removed.
 
-Teardown is idempotent and ordered: app stack, tagged schema-sync tables, buckets, then the core environment stack. Untagged tables are reported and preserved. Only buckets the `rc-env-<name>` stack itself created are emptied and deleted.
+Teardown is idempotent and ordered: buckets, then the core environment stack. Only buckets the `rc-env-<name>` stack itself created are emptied and deleted.
 
 ### Names
 
@@ -160,7 +163,7 @@ For `preview3`:
 |---|---|
 | Core stack | `rc-env-preview3` (derived) |
 | Application stack | `rc-app-preview3` (derived) |
-| DynamoDB table prefix | `rc-preview3-` (derived; the tables belong to `rc-dynamo-sync`) |
+| DynamoDB table prefix | `rc2-preview3-` (derived; data generation 2, so it can never match the old `rc-preview3-*` tables; the tables belong to `rc-dynamo-sync`) |
 | Buckets | Generated by CloudFormation as `rc-env-preview3-<logical id>-<suffix>`; read them with `rc-infra outputs --environment preview3` |
 
 Only the first three are derived. Never reconstruct a bucket name: it carries a random suffix, which is what lets a fresh environment be created while an older generation of buckets still exists.
@@ -186,7 +189,7 @@ uv run rc-infra apply [--config PATH] [--yes]
 The command:
 
 1. validates the config and verifies that the active AWS credentials belong to its `account_id`;
-2. plans `rc-platform`, `rc-identity` and every declared `rc-env-<name>` stack: `CREATE` when the stack does not exist, otherwise a CloudFormation update change set, created and discarded, that shows the exact `UPDATE` (or `NOOP`);
+2. plans `rc-platform` and every declared `rc-env-<name>` stack: `CREATE` when the stack does not exist, otherwise a CloudFormation update change set, created and discarded, that shows the exact `UPDATE` (or `NOOP`);
 3. inventories managed environments that exist in AWS but are absent from `envs.yaml` and reports their teardown as `DELETE`;
 4. prints each target as `BLOCKED`, `DELETE`, `CREATE`, `UPDATE`, or `NOOP`, preceded by a warning banner when anything would be deleted.
 
@@ -194,11 +197,14 @@ Only the stacks themselves are inspected. The planner never looks for other reso
 
 Without `--yes` it stops there: a dry run that modifies nothing. Building the plan is not literally API read-only — CloudFormation previews require temporary `CreateChangeSet` and `DeleteChangeSet` calls — but it never executes a change set.
 
-With `--yes`, it applies creates and updates before deletions, then prints the `status` report below. Failures in one environment are recorded without preventing independent environments from being attempted; any failure produces a nonzero exit code. An empty resource is never a failure.
+With `--yes`, it applies in dependency order — `rc-platform`, then the environments, then deletions — and prints the `status` report below. If `rc-platform` or a protected environment fails, nothing after it is attempted; a failed preview is recorded and the others still apply. Any failure produces a nonzero exit code; an empty resource is never a failure. Persistent stacks end up with termination protection, including one whose protection was turned off while nothing else changed.
 
-A `BLOCKED` action stops the whole apply only when it targets `rc-platform`, `rc-identity` or a protected environment (`prod`, `staging`, `dev`) — those are shared foundations, and applying anything on top of one nobody has looked at is not worth the speed. A blocked preview is skipped, counted as a failure, and everything else still applies. The plan output says which kind each one is.
+A `BLOCKED` action stops the whole apply only when it targets `rc-platform` or a protected environment (`prod`, `staging`, `dev`) — those are shared foundations, and applying anything on top of one nobody has looked at is not worth the speed. A blocked preview is skipped, counted as a failure, and everything else still applies. The plan output says which kind each one is. Besides a busy or broken stack, these are blocked:
 
-Two things are refused outright and cannot be applied at all: a change that would **replace or remove** a Cognito user pool, client or domain, or the shared Lambda execution role. There is no override flag. Replacing a pool creates an empty one and strands every account behind its `Retain` policy, and `main.yml` applies unattended, so this is not left to a reviewer to catch. If such a change is genuinely intended, make it by hand.
+- a stack of a managed name that exists but is not tagged as re-infra's: it is never taken over;
+- a change that would **replace or remove** an IAM role, S3 bucket, ECR repository, DynamoDB table or Cognito resource. There is no override flag: a replacement would strand data behind its `Retain` policy and point consumers at an empty copy, and `main.yml` applies unattended, so this is not left to a reviewer to catch. If such a change is genuinely intended, make it by hand.
+
+The replacement check runs on the preview and again on the change set apply actually executes, because the stack may have changed in between.
 
 Routine applies belong in the protected main-branch workflow, not on developer machines.
 
@@ -225,18 +231,23 @@ The report never says where data should come from; that belongs to `rc-data-tran
 uv run rc-infra outputs [--config PATH] [--environment NAME]
 ```
 
-Read-only. Prints the deployment contract as JSON — every identifier `retribalize-core` needs, read from the `rc-platform`, `rc-identity` and `rc-env-<name>` stack outputs:
+Read-only. Prints the deployment contract as JSON — every identifier `retribalize-core` needs, read from the `rc-platform` and `rc-env-<name>` stack outputs, plus the referenced Cognito identifiers from `envs.yaml`:
 
 ```json
 {
+  "schema_version": 2,
   "environment": "dev",
+  "account_id": "273268178059",
+  "region": "us-east-1",
+  "data": {"generation": 2, "table_prefix": "rc2-dev-"},
   "buckets": {"user-corpus": {"name": "rc-env-dev-usercorpusbucket-…", "arn": "arn:aws:s3:::…"}, "...": {}},
-  "identity": {"profile": "dev", "user_pool_id": "…", "client_id": "…", "oauth_domain": "rc-dev-v3.auth.us-east-1.amazoncognito.com"},
+  "identity": {"profile": "dev", "user_pool_id": "us-east-1_cbi939AdR", "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_cbi939AdR",
+               "client_id": "…", "oauth_domain": "rc-dev-v2.auth.us-east-1.amazoncognito.com"},
   "platform": {"lambda_execution_role_arn": "…", "base_repository_uri": "…", "api_repository_uri": "…", "matching_repository_uri": "…"}
 }
 ```
 
-Without `--environment` it prints a list, one entry per environment. A missing or unhealthy stack, or a missing output, fails with exit code `1` rather than printing a guess.
+Without `--environment` it prints a list, one entry per environment. A missing or unhealthy stack, or a missing output, fails with exit code `1` rather than printing a guess. Adding a field keeps `schema_version`; removing or changing one bumps it.
 
 ### Exit codes
 
@@ -253,11 +264,12 @@ Fresh infrastructure starts empty. Copying data into it is a separate, manual st
 ```bash
 uv run rc-data-transfer table  --source <table ARN>  --target <table ARN>  --dry-run
 uv run rc-data-transfer bucket --source <bucket ARN> --target <bucket ARN> --dry-run
-uv run rc-data-transfer resolve-copy --source-layout legacy --source-env preview67 --source-resource UserCorpusBucket \
-                                     --target-env dev --target-resource UserCorpusBucket --dry-run
+uv run rc-data-transfer bucket --source <bucket ARN> --target <bucket ARN> --apply --manifest out/registry.jsonl --include-versions
+uv run rc-data-transfer resolve-copy --source-layout legacy --source-env preview3 --source-resource UserCorpusBucket \
+                                     --target-env preview3 --target-resource UserCorpusBucket --dry-run
 ```
 
-It writes only into an empty target, refuses a table copy unless both configurations match exactly, and never modifies the source. See [`docs/DATA_TRANSFER.md`](docs/DATA_TRANSFER.md).
+It writes only into an empty target (or resumes into one holding exactly what its manifest recorded), refuses a table copy unless both configurations match exactly, and never modifies the source. A bucket copy replays every version and delete marker in order and records a manifest mapping each source version ID to the new one. See [`docs/DATA_TRANSFER.md`](docs/DATA_TRANSFER.md).
 
 ## 6. Reusable Python packages
 
@@ -265,7 +277,7 @@ It writes only into an empty target, refuses a table copy unless both configurat
 
 | Package | What it is |
 |---|---|
-| [`rc_dynamo`](python_packages/rc_dynamo/README.md) | A declarative DynamoDB layer - typed CRUD, index-aware queries, schema drift detection and migration - published as the Lambda parent image `rc-lambda-base`. |
+| [`rc_dynamo`](python_packages/rc_dynamo/README.md) | A declarative DynamoDB layer - typed CRUD, index-aware queries, schema and table-settings (TTL, PITR, deletion protection, billing, class, streams) drift detection and migration - published as the Lambda parent image `rc-lambda-base`. |
 
 ### The `rc-lambda-base` Lambda parent image
 
@@ -363,7 +375,8 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
 - resolve every identifier this repository owns from `rc-infra outputs --environment <name>` at deploy time — bucket names, the Cognito pool ID, client ID and OAuth domain, the shared Lambda execution role ARN, and the repository URIs — instead of hardcoding or reconstructing them, and refuse to deploy when that command fails;
 - push API and matching images to `rc-api-v2` and `rc-matching-v2`, not the `rc-ecr` stack's `rc-api` and `rc-matching`;
 - give every slot its own buckets: each `envs.yaml` environment, previews included, has its own `rc-env-<name>` stack and nothing is shared between slots;
-- own the Cognito trigger functions, their `live` aliases, and the `AWS::Lambda::Permission` that lets Cognito invoke them. The `rc-identity` pools have no triggers yet; wiring them is a later, deliberate stack update (see [`infra/identity.md`](infra/identity.md));
+- keep owning identity: the Cognito pools, clients, providers, trigger functions and their permissions. re-infra only passes the pool IDs from `envs.yaml` through `rc-infra outputs`;
+- create its tables under `data.table_prefix` (`rc2-<name>-`) only, never under an earlier generation's names, and delete an environment's stack and tables before it is removed from `envs.yaml`;
 - build service images from the immutable digest of `rc-lambda-base:main`, resolved from ECR rather than from a branch tag, and record that digest in its build manifest, refreshing it within 30 days of being superseded;
 - export `TABLES: Mapping[str, BaseTable]` from its schema module and invoke `rc-dynamo-sync --schema-module <module> --environment <name> --apply`;
 - own all `rc-app-<name>` application stacks and service releases.
@@ -373,8 +386,8 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
 1. With administrator credentials, create the GitHub OIDC role by hand. It is not declared in this repository: the role that deploys the infrastructure cannot be deployed by it, and keeping it out of the templates means a mistake here can never be applied automatically. Requirements:
 
    - **Trust policy:** `sts:AssumeRoleWithWebIdentity` federated through the account's `token.actions.githubusercontent.com` OIDC provider, with `aud` equal to `sts.amazonaws.com` and `sub` matching `repo:<org>/re-infra:ref:refs/heads/*`. Every branch may assume it, because `deploy-images.yml` publishes an image tag from every branch; only `main.yml` routes it into an infrastructure apply. Create the OIDC provider only if the account does not already have one — an account can hold just one.
-   - **Permissions.** CloudFormation runs with this role's own credentials, so it needs everything a deploy or teardown touches: full management of the `rc-platform`, `rc-identity` and `rc-env-*` stacks, `cloudformation:DeleteStack` on `rc-app-*` and the underlying Lambda, API Gateway, SQS, CloudFront and log permissions those deletes exercise, `iam:PassRole` on `rc-app-*` roles, push access to the shared ECR repositories, and enough S3 and DynamoDB access to inspect, empty and delete `rc-*` buckets and `ManagedBy=rc-dynamo-sync` tables.
-   - **Denies.** Add explicit denies on deleting the `rc-env-prod`, `rc-env-staging`, `rc-env-dev`, `rc-app-prod`, `rc-app-staging`, `rc-app-dev`, `rc-platform` and `rc-identity` stacks, the `rc-env-{prod,staging,dev}-*` buckets and the `rc-{prod,staging,dev}-*` tables. `rc-infra` refuses these itself, but IAM is what makes it impossible.
+   - **Permissions.** CloudFormation runs with this role's own credentials, so it needs everything a deploy or teardown touches: full management of the `rc-platform` and `rc-env-*` stacks, push access to the shared ECR repositories, enough S3 access to inspect, empty and delete `rc-env-*` buckets, and DynamoDB read access to report on `ManagedBy=rc-dynamo-sync` tables.
+   - **Denies.** Add explicit denies on deleting the `rc-env-prod`, `rc-env-staging`, `rc-env-dev`, `rc-app-prod`, `rc-app-staging`, `rc-app-dev` and `rc-platform` stacks, the `rc-env-{prod,staging,dev}-*` buckets and the `rc-{prod,staging,dev}-*` / `rc2-{prod,staging,dev}-*` tables. `rc-infra` refuses these itself, but IAM is what makes it impossible.
 
 2. Put the role's ARN in `AWS_ROLE_GITHUB` and add `AWS_REGION=us-east-1`.
 3. Protect `main`: require CODEOWNERS review and the checks from `non-main.yml`, which is what runs on a pull request's source branch. A called workflow reports its checks as `<calling job> / <called job>`, so the validation check is named `validate / Lint, test, validate`. The image check is named `deploy-images / Build, test, and publish`. Jobs that exist only in `main.yml`, such as `deploy-infra`, can never be required checks. Block force pushes and branch deletion.
@@ -385,7 +398,7 @@ See [the package README](python_packages/rc_dynamo/README.md#2-local-development
    AWS_PROFILE=<profile> uv run rc-infra apply --yes    # then carry it out
    ```
 
-   The plan should say `CREATE` for `platform`, `identity` and every environment, and nothing else. Every stack is created from scratch: the buckets and the role get generated names, and the pools and domains carry a `-v3` suffix, so all of it coexists with the resources of earlier generations without touching them. Expect `prod`, `staging` and `dev` to come up **empty** — `rc-infra status` lists what holds no data yet, and moving data in is the manual step in section 5.
+   The plan should say `CREATE` for `platform` and every environment, and nothing else. Every stack is created from scratch: the buckets and the role get generated names, so all of it coexists with the resources of earlier generations without touching them. Expect `prod`, `staging` and `dev` to come up **empty** — `rc-infra status` lists what holds no data yet, and moving data in is the manual step in section 5.
 
 ## 10. Troubleshooting
 

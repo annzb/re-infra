@@ -31,7 +31,7 @@ def test_derived_names(env_config: Any) -> None:
     env = env_config.get("preview67")
     assert env.core_stack == "rc-env-preview67"
     assert env.app_stack == "rc-app-preview67"
-    assert env.table_prefix == "rc-preview67-"
+    assert env.table_prefix == "rc2-preview67-"
     assert not env.protected
     assert env_config.get("prod").protected
 
@@ -41,15 +41,23 @@ def test_identity_defaults_to_same_named_profile_then_preview(env_config: Any) -
     assert env_config.get("preview3").identity_profile == "preview"
 
 
-def test_identity_profiles_hold_no_aws_ids(raw_config: dict[str, Any]) -> None:
-    """Pool and client IDs are stack outputs, never desired state."""
-    raw_config["identity_profiles"]["prod"] = {"user_pool_id": "us-east-1_abc"}
+def test_identity_profile_carries_the_existing_pool(env_config: Any) -> None:
+    """The pools are referenced, not managed: their IDs are configuration."""
+    identity = env_config.get("preview3").identity
+    assert (identity.user_pool_id, identity.client_id) == ("us-east-1_LwH5lWQ0q", "1e8lodbfnn00pbkq7rj1n5smfo")
+    assert identity.domain == "rc-preview-v2.auth.us-east-1.amazoncognito.com"
+
+
+def test_malformed_pool_id_is_rejected(raw_config: dict[str, Any]) -> None:
+    raw_config["identity_profiles"]["prod"]["user_pool_id"] = "not-a-pool"
     assert any(e.startswith("identity_profiles.prod.user_pool_id:") for e in _errors(raw_config))
 
 
-def test_empty_profile_entry_means_defaults(raw_config: dict[str, Any]) -> None:
-    raw_config["identity_profiles"]["preview"] = None
-    assert parse_env_config(raw_config).get("preview3").identity_profile == "preview"
+def test_profile_needs_every_identifier(raw_config: dict[str, Any]) -> None:
+    raw_config["identity_profiles"]["preview"] = {"user_pool_id": "us-east-1_abc"}
+    errors = _errors(raw_config)
+    assert "identity_profiles.preview.client_id: Field required" in errors
+    assert "identity_profiles.preview.domain: Field required" in errors
 
 
 def test_explicit_identity(raw_config: dict[str, Any]) -> None:

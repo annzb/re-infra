@@ -11,7 +11,11 @@ Pure functions over the two dicts produced by `BaseTable.expected_schema()` and
 The governing rule
 ------------------
 **`None` in a declaration means "not modeled -- do not enforce, inherit what is
-live."** It applies uniformly to a GSI's `sort_key` and its `projection`.
+live."** It applies uniformly to a GSI's `sort_key` and its `projection`. Table
+options follow the same rule through an explicit sentinel, `UNMANAGED`
+(see `rc_dynamo.schema.options`), because `None` is a meaningful value there
+(TTL / streams disabled). An unmanaged option is never compared and never
+turned off.
 
 The `BaseItem.gsis` shorthand can only express a HASH key, so every index
 declared through it reports `sort_key=None` and `projection=None`. Treating that
@@ -21,20 +25,49 @@ Such gaps are still reported -- as `UNDECLARED_*` findings, whose only remedy is
 a human editing the Python -- so "no conflicts" never silently means "we didn't
 look".
 
-Deliberately NOT compared
+What is compared
+----------------
+* Primary key, key attribute types, GSIs (keys, projection incl. INCLUDE).
+* Table options, when declared: billing mode, table class, deletion protection,
+  point-in-time recovery, TTL attribute, stream view type. Drift is a
+  `CONFLICTING_TABLE_OPTION` fixed in place (`UPDATE_OPTIONS`). Weakening a
+  protection -- disabling PITR or deletion protection -- is `DISABLE_PROTECTION`
+  and needs `ALLOW_PROTECTION_DOWNGRADE`. None of these needs a new table.
+
+Unsupported live features
 -------------------------
-TTL, streams, PITR / continuous backups, tags, autoscaling, SSE, table class,
-deletion protection, and **local secondary indexes**. LSIs deserve the loudest
-warning: they cannot be added or removed after a table is created, so a live LSI
-this model cannot see is destroyed unrecoverably by any table recreate.
+Things this model cannot express, so a recreate could not reproduce them, are
+reported as `UNSUPPORTED_LIVE_FEATURE`: **local secondary indexes**, KMS
+encryption (AWS-managed or customer key), global-table replicas, on-demand
+throughput limits, and -- unless declared -- a stream, the infrequent-access table
+class, or provisioned billing. They never block a deploy that leaves the table in
+place, but any table recreate is refused (`RECREATE_REFUSED`) while one exists,
+and while deletion protection is enabled live. LSIs deserve the loudest warning:
+they cannot be added after a table is created, so a recreate destroys them
+unrecoverably.
+
+Not inspected at all
+--------------------
+Tags beyond the sync's ownership tags, autoscaling policies, contributor
+insights, AWS Backup plans and warm throughput. Kinesis streaming destinations
+and resource policies are not part of the schema dicts either; the sync checks
+them live just before a recreate and refuses if either exists.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+from rc_dynamo.schema.options import (
+    BILLING_PROVISIONED,
+    OPTION_NAMES,
+    TABLE_CLASS_INFREQUENT_ACCESS,
+    UNMANAGED,
+    Unmanaged,
+)
 
 # Attribute-type codes DynamoDB allows on a key attribute.
 KEY_ATTRIBUTE_TYPES = ("S", "N", "B")
@@ -51,6 +84,7 @@ class Severity(StrEnum):
     CONFLICT = "conflict"  # declared and live disagree about a modeled thing
     MISSING = "missing"  # declared, absent live
     UNDECLARED = "undeclared"  # live, not modeled in Python
+    UNSUPPORTED = "unsupported"  # live, and not even expressible in Python
     INFO = "info"  # observation this tooling does not manage
 
 
@@ -62,12 +96,20 @@ class FindingKind(StrEnum):
     UNDECLARED_SORT_KEY = "undeclared_sort_key"
     UNDECLARED_PROJECTION = "undeclared_projection"
     UNDECLARED_ATTRIBUTE = "undeclared_attribute"
+    UNDECLARED_TABLE_OPTION = "undeclared_table_option"
 
     CONFLICTING_TABLE_KEY = "conflicting_table_key"
     CONFLICTING_GSI_KEY = "conflicting_gsi_key"
     CONFLICTING_PROJECTION = "conflicting_projection"
     CONFLICTING_ATTRIBUTE_TYPE = "conflicting_attribute_type"
+    CONFLICTING_TABLE_OPTION = "conflicting_table_option"
 
+    UNSUPPORTED_LIVE_FEATURE = "unsupported_live_feature"
+    RECREATE_REFUSED = "recreate_refused"
+
+    # No longer emitted: billing mode is now a TableOptions field, so a mismatch
+    # is CONFLICTING_TABLE_OPTION (declared) or UNSUPPORTED_LIVE_FEATURE (not).
+    # Kept so code that names it keeps importing.
     UNMANAGED_BILLING_MODE = "unmanaged_billing_mode"
 
 
@@ -83,6 +125,8 @@ class Remedy(StrEnum):
     REBUILD_GSI = "rebuild_gsi"
     DELETE_GSI = "delete_gsi"
     RECREATE_TABLE = "recreate_table"
+    UPDATE_OPTIONS = "update_options"
+    DISABLE_PROTECTION = "disable_protection"
     ADOPT_DECLARATION = "adopt_declaration"
     NONE = "none"
 
@@ -90,6 +134,7 @@ class Remedy(StrEnum):
 class Permission(StrEnum):
     PRUNE_UNDECLARED = "prune_undeclared"
     ALLOW_TABLE_RECREATE = "allow_table_recreate"
+    ALLOW_PROTECTION_DOWNGRADE = "allow_protection_downgrade"
 
 
 # Creating what the code declares, and reconciling an index the code already
@@ -97,6 +142,13 @@ class Permission(StrEnum):
 # "declarations are the source of truth" means. Rebuilding a GSI deletes and
 # recreates one index; it cannot lose a row, because a GSI holds only derived
 # data. Destroying undeclared work, or a table's rows, is opt-in.
+#
+# UPDATE_OPTIONS applies a declared table option in place (TTL, enabling PITR or
+# deletion protection, billing mode, table class, streams) and is ungated for the
+# same reason. DISABLE_PROTECTION is the one in-place option change that is not:
+# turning PITR off discards the restore window irrecoverably, and turning
+# deletion protection off removes the only guard against a DeleteTable. A
+# declaration flipping either to False must be confirmed by an operator.
 #
 # ADOPT_DECLARATION maps to None because it is never automatable: the only fix
 # is a human editing the Python. Those findings are reported and skipped.
@@ -106,6 +158,8 @@ REQUIRED_PERMISSION: Mapping[Remedy, Permission | None] = {
     Remedy.REBUILD_GSI: None,
     Remedy.DELETE_GSI: Permission.PRUNE_UNDECLARED,
     Remedy.RECREATE_TABLE: Permission.ALLOW_TABLE_RECREATE,
+    Remedy.UPDATE_OPTIONS: None,
+    Remedy.DISABLE_PROTECTION: Permission.ALLOW_PROTECTION_DOWNGRADE,
     Remedy.ADOPT_DECLARATION: None,
     Remedy.NONE: None,
 }
@@ -118,8 +172,13 @@ AUTOMATABLE_REMEDIES = frozenset(
         Remedy.REBUILD_GSI,
         Remedy.DELETE_GSI,
         Remedy.RECREATE_TABLE,
+        Remedy.UPDATE_OPTIONS,
+        Remedy.DISABLE_PROTECTION,
     }
 )
+
+# Remedies that replace the physical table. Everything else automatable is in place.
+NEW_TABLE_REMEDIES = frozenset({Remedy.CREATE_TABLE, Remedy.RECREATE_TABLE})
 
 
 @dataclass(frozen=True)
@@ -141,6 +200,11 @@ class Finding:
     @property
     def is_automatable(self) -> bool:
         return self.remedy in AUTOMATABLE_REMEDIES
+
+    @property
+    def needs_new_table(self) -> bool:
+        """Whether resolving this finding means a new physical table."""
+        return self.remedy in NEW_TABLE_REMEDIES
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -203,14 +267,29 @@ class SchemaDiff:
             and not granted.get(f.required_permission, False)
         )
 
+    def unfixable(self) -> tuple[Finding, ...]:
+        """Conflicts no permission lets the deploy resolve. These fail the run too.
+
+        A declared option the sync cannot apply (switching to PROVISIONED), or a
+        recreate refused because the live table has something it would destroy.
+        A human has to change AWS or the declaration.
+        """
+        return tuple(
+            f
+            for f in self.findings
+            if f.severity is Severity.CONFLICT
+            and not f.is_automatable
+            and f.remedy is not Remedy.ADOPT_DECLARATION
+        )
+
     def requires_action(self, granted: Mapping[Permission, bool]) -> bool:
         """Whether the live schema differs in a way the sync cares about.
 
-        Drives the dry-run exit code. Undeclared elements are excluded: they are
-        reported, but the sync will never act on them, so a deploy that leaves
-        them alone has nothing to do.
+        Drives the dry-run exit code. Undeclared and unsupported elements are
+        excluded: they are reported, but the sync will never act on them, so a
+        deploy that leaves them alone has nothing to do.
         """
-        return bool(self.actionable(granted) or self.blocked(granted))
+        return bool(self.actionable(granted) or self.blocked(granted) or self.unfixable())
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -220,10 +299,14 @@ class SchemaDiff:
 
 
 def _jsonable(value: Any) -> Any:
+    if isinstance(value, Unmanaged):
+        return value.value
     if isinstance(value, (set, frozenset)):
         return sorted(value)
     if isinstance(value, Mapping):
         return {key: _jsonable(inner) for key, inner in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(inner) for inner in value]
     return value
 
 
@@ -384,6 +467,300 @@ def _diff_gsi(
     return findings
 
 
+# ─────────────────────────────── table options ───────────────────────────────
+
+_OPTION_LABELS: Mapping[str, str] = {
+    "billing_mode": "billing mode",
+    "table_class": "table class",
+    "deletion_protection": "deletion protection",
+    "point_in_time_recovery": "point-in-time recovery",
+    "ttl_attribute": "TTL",
+    "stream_view_type": "stream",
+}
+
+# The options whose True -> False transition weakens a protection.
+_PROTECTION_OPTIONS = frozenset({"deletion_protection", "point_in_time_recovery"})
+
+# What CreateTable produces when an option is not set. An unmanaged option whose
+# live value differs from this is worth reporting as UNDECLARED: it is inherited
+# on recreate, but nothing enforces it. Billing, class and streams are absent on
+# purpose -- a non-default live value there is UNSUPPORTED, not merely undeclared.
+_CREATE_DEFAULTS: Mapping[str, Any] = {
+    "deletion_protection": False,
+    "point_in_time_recovery": False,
+    "ttl_attribute": None,
+}
+
+
+def _describe_option(name: str, value: Any) -> str:
+    if value is UNMANAGED:
+        return "unmanaged"
+    if isinstance(value, bool):
+        return "enabled" if value else "disabled"
+    if value is None:
+        return "disabled"
+    if name == "ttl_attribute":
+        return f"enabled on {value!r}"
+    return str(value)
+
+
+def _option_remedy(name: str, declared: Any, live: Any) -> Remedy:
+    if name in _PROTECTION_OPTIONS and declared is False and live is True:
+        return Remedy.DISABLE_PROTECTION
+    if name == "billing_mode" and declared == BILLING_PROVISIONED:
+        # Provisioned capacity (and its autoscaling) is not modeled, so there is
+        # nothing to switch *to*. Declaring PROVISIONED only acknowledges it.
+        return Remedy.NONE
+    return Remedy.UPDATE_OPTIONS
+
+
+def _option_consequence(name: str, remedy: Remedy, live: Any) -> str:
+    if remedy is Remedy.DISABLE_PROTECTION:
+        return "disabling a protection must be explicitly allowed"
+    if remedy is Remedy.NONE:
+        return (
+            "the sync cannot switch a table to PROVISIONED because capacity is not "
+            "modeled; change it in AWS, or declare PAY_PER_REQUEST"
+        )
+    if name == "ttl_attribute" and isinstance(live, str):
+        return (
+            "it will be changed in place. Moving TTL to another attribute disables it "
+            "first, and DynamoDB allows one TTL change per hour, so this can take two "
+            "deploys"
+        )
+    return "it will be changed in place"
+
+
+def _diff_options(
+    table_name: str,
+    declared_options: Mapping[str, Any],
+    actual: Mapping[str, Any],
+) -> list[Finding]:
+    """Declared-vs-live drift for every option the declaration manages.
+
+    An option that is UNMANAGED in the declaration -- or unknown live, as in a
+    hand-built schema dict -- is not compared at all.
+    """
+    live_options: Mapping[str, Any] = actual.get("options", {})
+    findings: list[Finding] = []
+    for name in OPTION_NAMES:
+        declared = declared_options.get(name, UNMANAGED)
+        live = live_options.get(name, UNMANAGED)
+        if live is UNMANAGED:
+            continue
+        if declared is UNMANAGED:
+            if name in _CREATE_DEFAULTS and live != _CREATE_DEFAULTS[name]:
+                findings.append(
+                    Finding(
+                        kind=FindingKind.UNDECLARED_TABLE_OPTION,
+                        severity=Severity.UNDECLARED,
+                        remedy=Remedy.ADOPT_DECLARATION,
+                        table_name=table_name,
+                        attribute=name,
+                        message=(
+                            f"{table_name}: live {_OPTION_LABELS[name]} is "
+                            f"{_describe_option(name, live)}, which table_options does not "
+                            f"model. Left as-is and inherited on recreate; declare {name} "
+                            f"to make it authoritative"
+                        ),
+                        live=live,
+                    )
+                )
+            continue
+        if declared == live:
+            continue
+        remedy = _option_remedy(name, declared, live)
+        findings.append(
+            Finding(
+                kind=FindingKind.CONFLICTING_TABLE_OPTION,
+                severity=Severity.CONFLICT,
+                remedy=remedy,
+                table_name=table_name,
+                attribute=name,
+                message=(
+                    f"{table_name}: declared {_OPTION_LABELS[name]} "
+                    f"{_describe_option(name, declared)} but live is "
+                    f"{_describe_option(name, live)}; "
+                    f"{_option_consequence(name, remedy, live)}"
+                ),
+                declared=declared,
+                live=live,
+            )
+        )
+    return findings
+
+
+def _unsupported(
+    table_name: str,
+    attribute: str,
+    live: Any,
+    message: str,
+    index_name: str | None = None,
+) -> Finding:
+    return Finding(
+        kind=FindingKind.UNSUPPORTED_LIVE_FEATURE,
+        severity=Severity.UNSUPPORTED,
+        remedy=Remedy.NONE,
+        table_name=table_name,
+        index_name=index_name,
+        attribute=attribute,
+        message=message,
+        live=live,
+    )
+
+
+def _unsupported_features(
+    table_name: str,
+    declared_options: Mapping[str, Any],
+    actual: Mapping[str, Any],
+) -> list[Finding]:
+    """Live features this tooling cannot reproduce. Each one makes a recreate refuse."""
+    features: Mapping[str, Any] = actual.get("features", {})
+    live_options: Mapping[str, Any] = actual.get("options", {})
+    findings: list[Finding] = []
+    left_alone = "Left as-is, but a table recreate is refused while it exists"
+
+    lsis: Mapping[str, Any] = features.get("local_secondary_indexes") or {}
+    for index_name in sorted(lsis):
+        findings.append(
+            _unsupported(
+                table_name,
+                "local_secondary_index",
+                dict(lsis[index_name]),
+                (
+                    f"{index_name}: live local secondary index, which cannot be modeled "
+                    f"here. An LSI cannot be added after a table is created, so a "
+                    f"recreate would destroy it unrecoverably. {left_alone}"
+                ),
+                index_name=index_name,
+            )
+        )
+
+    def undeclared_option(name: str, live_value: Any, what: str) -> None:
+        if declared_options.get(name, UNMANAGED) is not UNMANAGED:
+            return  # declared: compared by _diff_options instead
+        findings.append(
+            _unsupported(
+                table_name,
+                name,
+                live_value,
+                (
+                    f"{table_name}: live {what}, which the declaration does not model. "
+                    f"{left_alone}; declare {name} in table_options to adopt it"
+                ),
+            )
+        )
+
+    stream = live_options.get("stream_view_type", UNMANAGED)
+    if stream is not UNMANAGED and stream is not None:
+        undeclared_option("stream_view_type", stream, f"stream ({stream})")
+    if live_options.get("table_class") == TABLE_CLASS_INFREQUENT_ACCESS:
+        undeclared_option(
+            "table_class", TABLE_CLASS_INFREQUENT_ACCESS, "table class STANDARD_INFREQUENT_ACCESS"
+        )
+    if live_options.get("billing_mode") == BILLING_PROVISIONED:
+        undeclared_option("billing_mode", BILLING_PROVISIONED, "PROVISIONED billing")
+
+    sse = features.get("sse")
+    if sse:
+        findings.append(
+            _unsupported(
+                table_name,
+                "sse",
+                dict(sse),
+                (
+                    f"{table_name}: live KMS encryption ({sse.get('kms_key') or 'AWS managed'}), "
+                    f"which cannot be modeled here. {left_alone}"
+                ),
+            )
+        )
+
+    replicas = features.get("replicas") or ()
+    if replicas:
+        findings.append(
+            _unsupported(
+                table_name,
+                "replicas",
+                sorted(replicas),
+                (
+                    f"{table_name}: global-table replicas in {', '.join(sorted(replicas))}, "
+                    f"which cannot be modeled here. {left_alone}"
+                ),
+            )
+        )
+
+    on_demand = features.get("on_demand_throughput")
+    if on_demand:
+        findings.append(
+            _unsupported(
+                table_name,
+                "on_demand_throughput",
+                dict(on_demand),
+                (
+                    f"{table_name}: live on-demand throughput limits {dict(on_demand)}, "
+                    f"which cannot be modeled here. {left_alone}"
+                ),
+            )
+        )
+
+    return findings
+
+
+_FEATURE_LABELS: Mapping[str, str] = {
+    "local_secondary_index": "local secondary index",
+    "stream_view_type": "an undeclared stream",
+    "table_class": "an undeclared STANDARD_INFREQUENT_ACCESS table class",
+    "billing_mode": "undeclared PROVISIONED billing",
+    "sse": "KMS encryption",
+    "replicas": "global-table replicas",
+    "on_demand_throughput": "on-demand throughput limits",
+}
+
+
+def recreate_blockers(
+    unsupported: Sequence[Finding],
+    actual: Mapping[str, Any],
+    declared_options: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Why a recreate of this live table must not run, as human-readable reasons."""
+    reasons = []
+    if (declared_options or {}).get("billing_mode") == BILLING_PROVISIONED:
+        # The new table could not be created: capacity is not modeled.
+        reasons.append("declared PROVISIONED billing, which this tooling cannot create")
+    for finding in unsupported:
+        label = _FEATURE_LABELS.get(str(finding.attribute), str(finding.attribute))
+        if finding.index_name:
+            label = f"{label} {finding.index_name!r}"
+        reasons.append(label)
+    if actual.get("options", {}).get("deletion_protection") is True:
+        reasons.append("deletion protection enabled")
+    return reasons
+
+
+def _recreate_refusal(
+    table_name: str,
+    unsupported: Sequence[Finding],
+    actual: Mapping[str, Any],
+    declared_options: Mapping[str, Any],
+) -> Finding | None:
+    reasons = recreate_blockers(unsupported, actual, declared_options)
+    if not reasons:
+        return None
+    return Finding(
+        kind=FindingKind.RECREATE_REFUSED,
+        severity=Severity.CONFLICT,
+        remedy=Remedy.NONE,
+        table_name=table_name,
+        message=(
+            f"{table_name}: a table recreate is needed but refused: the live table has "
+            f"{', '.join(reasons)}. A recreate would destroy what this tooling cannot "
+            f"reproduce, and a protected table is never deleted. Resolve these in AWS "
+            f"first, or declare the stream / table class / billing mode"
+        ),
+        live=reasons,
+    )
+
+
 def diff_schemas(
     expected: Mapping[str, Any],
     actual: Mapping[str, Any] | None,
@@ -496,24 +873,14 @@ def diff_schemas(
             )
         )
 
-    # Billing mode is not declarable today -- expected_schema() hardcodes
-    # PAY_PER_REQUEST -- so a mismatch is an observation, not drift.
-    expected_billing = expected.get("billing_mode")
-    actual_billing = actual.get("billing_mode")
-    if expected_billing and actual_billing and expected_billing != actual_billing:
-        findings.append(
-            Finding(
-                kind=FindingKind.UNMANAGED_BILLING_MODE,
-                severity=Severity.INFO,
-                remedy=Remedy.NONE,
-                table_name=table_name,
-                message=(
-                    f"{table_name}: live billing mode is {actual_billing!r} but the code "
-                    f"assumes {expected_billing!r}. Not managed by this tooling"
-                ),
-                declared=expected_billing,
-                live=actual_billing,
-            )
-        )
+    findings.extend(_diff_options(table_name, expected.get("options", {}), actual))
+    unsupported = _unsupported_features(table_name, expected.get("options", {}), actual)
+    findings.extend(unsupported)
+
+    recreates = [f for f in findings if f.remedy is Remedy.RECREATE_TABLE]
+    if recreates:
+        refusal = _recreate_refusal(table_name, unsupported, actual, expected.get("options", {}))
+        if refusal is not None:
+            findings.append(refusal)
 
     return SchemaDiff(table_name=table_name, findings=tuple(findings))

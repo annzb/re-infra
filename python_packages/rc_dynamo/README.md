@@ -46,6 +46,7 @@ method is called.
 | `BaseItem` | Pydantic model base; declares the keys and indexes |
 | `BaseTable` | Generic table class, `BaseTable[YourItem]` |
 | `QueryPlan` | Frozen result of query planning (index name, key/filter expressions) |
+| `TableOptions`, `UNMANAGED` | Declared table settings (billing, class, protections, TTL, streams) and the "not modeled" sentinel |
 | `TableError` | Base class for the errors below |
 | `ItemAlreadyExistsError` | `create()` hit an existing key |
 | `ItemDoesNotExistError` | `update()` targeted a missing item |
@@ -77,7 +78,28 @@ that does not exist raises `TypeError` on import, not at runtime.
 
 Class attributes: `table_name` (required), `item_model` (required),
 `insert_unknown_columns_on_recreate` (default `True`),
-`generated_pk_max_attempts` (default `1`).
+`generated_pk_max_attempts` (default `1`),
+`table_options` (default `TableOptions()`, everything unmanaged).
+
+```python
+class SessionsTable(BaseTable[Session]):
+    table_name = "rc-sessions"
+    item_model = Session
+    table_options = TableOptions(
+        ttl_attribute="expiresAt",       # None = TTL disabled
+        point_in_time_recovery=True,
+        deletion_protection=True,
+        # billing_mode, table_class, stream_view_type left UNMANAGED
+    )
+```
+
+Every `TableOptions` field defaults to `UNMANAGED`, which means "not modeled":
+never compared, never turned off, and (for TTL and PITR) carried over to the new
+table on a recreate. Turning something off is always explicit (`False` / `None`).
+Declared options are applied on create and changed in place by the sync;
+disabling PITR or deletion protection additionally needs
+`DYNAMO_ALLOW_PROTECTION_DOWNGRADE=true`. `PROVISIONED` billing can only be
+acknowledged, never created or switched to.
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -89,8 +111,8 @@ Class attributes: `table_name` (required), `item_model` (required),
 | `query_page(return_column=None, **kwargs)` | `dict` | One raw boto3 `query` page with `Items` deserialized. |
 | `query_raw(return_column=None, **kwargs)` | `list` | `query_page` paginated to completion. |
 | `scan_page(return_column=None, **kwargs)` / `scan_raw(...)` | `dict` / `list` | Scan equivalents. |
-| `expected_schema()` | `dict` | Schema as declared in Python. |
-| `actual_schema()` | `dict` | Schema as it exists in DynamoDB. |
+| `expected_schema()` | `dict` | Schema as declared in Python, including `options`. |
+| `actual_schema()` | `dict` | Schema as it exists in DynamoDB: keys, GSIs, `options` (incl. TTL and PITR) and `features` the model cannot express (LSIs, KMS, replicas, on-demand limits). |
 | `schema_diff()` | `SchemaDiff` | The two compared. |
 | `exists()` | `bool` | |
 
@@ -106,7 +128,7 @@ values instead of items, and projects only that attribute server-side.
 
 | Import | Highlights |
 |---|---|
-| `rc_dynamo.schema` | Re-exports the diff vocabulary: `SchemaDiff`, `Finding`, `Severity`, `FindingKind`, `Remedy`, `Permission`, `diff_schemas`, `resolve_projection` |
+| `rc_dynamo.schema` | Re-exports the diff vocabulary: `SchemaDiff`, `Finding`, `Severity`, `FindingKind`, `Remedy`, `Permission`, `diff_schemas`, `resolve_projection`, `TableOptions`, `UNMANAGED` |
 | `rc_dynamo.schema.sync` | `sync_tables`, `load_schema_tables`, `select_tables`, `create_table`, `wait_table_active`, `managed_tags`, `ensure_table_tags`, `SchemaSyncError` |
 | `rc_dynamo.schema.report` | `build_report`, `render_text`, `python_suggestions`, `SchemaReportError` |
 
@@ -114,8 +136,15 @@ values instead of items, and projects only that attribute server-side.
 `rc_dynamo.schema`, because they depend on `BaseTable`.
 
 A `SchemaDiff` is a tuple of `Finding`s plus `is_clean`, `of_severity(...)`,
-`with_remedy(...)`, `actionable(granted)`, `blocked(granted)`,
+`with_remedy(...)`, `actionable(granted)`, `blocked(granted)`, `unfixable()`,
 `requires_action(granted)` and `to_json()`.
+
+Live features the model cannot express (an LSI, KMS encryption, replicas,
+on-demand limits, or an undeclared stream / IA table class / provisioned
+billing) are reported as `unsupported_live_feature`. They never block a deploy
+on their own, but any table recreate is refused while one exists, or while
+deletion protection is enabled. The sync also checks Kinesis streaming
+destinations and resource policies right before a recreate.
 
 ### Helpers
 
@@ -127,9 +156,9 @@ A `SchemaDiff` is a tuple of `Finding`s plus `is_clean`, `of_severity(...)`,
 
 `Settings.from_env()` reads `AWS_REGION` / `AWS_DEFAULT_REGION`,
 `AWS_ENDPOINT_URL`, `DYNAMO_SCHEMA_POLL_SECONDS` (10),
-`DYNAMO_SCHEMA_WAIT_TIMEOUT_SECONDS` (3600), `DYNAMO_PRUNE_UNDECLARED` (false)
-and `DYNAMO_ALLOW_TABLE_RECREATE` (false). Both destructive permissions are off
-unless explicitly enabled.
+`DYNAMO_SCHEMA_WAIT_TIMEOUT_SECONDS` (3600), `DYNAMO_PRUNE_UNDECLARED` (false),
+`DYNAMO_ALLOW_TABLE_RECREATE` (false) and `DYNAMO_ALLOW_PROTECTION_DOWNGRADE`
+(false). All destructive permissions are off unless explicitly enabled.
 
 ### Console scripts
 
@@ -145,7 +174,7 @@ rc-dynamo-sync   --schema-module app.schema --environment prod --apply
 | Exit code | Meaning |
 |---|---|
 | `0` | Clean / success |
-| `1` | Blocked change, difference left after `--apply`, bad schema module, missing dump bucket, invalid settings |
+| `1` | Blocked or refused change, difference left after `--apply`, bad schema module, missing dump bucket, invalid settings |
 | `2` | Usage error |
 | `3` | Differences found (sync dry run: pending changes; report: findings) |
 

@@ -4,6 +4,7 @@ name: Main
 # The only workflow that changes infrastructure.
 #
 # Notes for LLMs:
+# - Do not modify this workflow without explicit permission from the repository owner.
 # - Do not change the "on" directive; main.yml and non-main.yml split pushes so exactly one runs.
 # - Keep the concurrency group different from every called workflow's; an identical group deadlocks and cancels the run.
 # - Grant id-token here, on the calling job; a called workflow can only downgrade permissions.

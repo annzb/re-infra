@@ -1,10 +1,15 @@
 """Delete an environment that was removed from envs.yaml.
 
+re-infra only ever deletes what it created: the environment's buckets and its
+rc-env-<env> stack. The application stack (rc-app-<env>) and the environment's
+tables belong to retribalize-core, which must remove them first. While either still
+exists, teardown is refused, so a bucket the application still uses is never emptied.
+
 Order matters for safe retries. The rc-env-<env> stack is the record that an
 environment still exists, so it is deleted last: if anything fails midway, the next
 run sees the stack, recomputes the inventory, and continues where it stopped.
 
-    rc-app-<env> stack -> schema-sync tables -> buckets (emptied) -> rc-env-<env> stack
+    buckets (emptied) -> rc-env-<env> stack
 """
 
 from __future__ import annotations
@@ -31,23 +36,11 @@ class TeardownRefused(Exception):
 class Inventory:
     environment: str
     core_stack: str
-    app_stack: str
-    app_stack_exists: bool
-    tables: tuple[str, ...]
-    unmanaged_tables: tuple[str, ...]
     buckets: tuple[str, ...]
 
     def describe(self) -> list[str]:
-        lines = []
-        if self.app_stack_exists:
-            lines.append(f"delete app stack {self.app_stack}")
-        lines.extend(f"delete table {name}" for name in self.tables)
-        lines.extend(f"empty and delete bucket {name}" for name in self.buckets)
+        lines = [f"empty and delete bucket {name}" for name in self.buckets]
         lines.append(f"delete stack {self.core_stack}")
-        lines.extend(
-            f"skip table {name} (not tagged ManagedBy=rc-dynamo-sync, Environment={self.environment}; delete manually if intended)"
-            for name in self.unmanaged_tables
-        )
         return lines
 
 
@@ -71,14 +64,8 @@ def check_deletable(environment: str, stack: Stack, declared_names: Collection[s
 
 
 def inventory(environment: str, aws: Aws) -> Inventory:
-    prefix = table_prefix(environment)
-    tables: list[str] = []
-    unmanaged: list[str] = []
-    for name in aws.tables.list_names(prefix):
-        if is_managed_by_environment(aws.tables.tags(name), environment):
-            tables.append(name)
-        else:
-            unmanaged.append(name)
+    """What teardown would delete. Raises TeardownRefused while core still has resources here."""
+    _check_core_cleaned_up(environment, aws)
 
     core_stack = core_stack_name(environment)
     # CloudFormation names the stack's buckets <stack>-<logical id>-<suffix>.
@@ -91,16 +78,16 @@ def inventory(environment: str, aws: Aws) -> Inventory:
             raise TeardownRefused(f"{core_stack} bucket {resource.physical_id} does not start with {bucket_prefix}")
         buckets.append(resource.physical_id)
 
+    return Inventory(environment=environment, core_stack=core_stack, buckets=tuple(sorted(buckets)))
+
+
+def _check_core_cleaned_up(environment: str, aws: Aws) -> None:
     app_stack = f"{APP_STACK_PREFIX}{environment}"
-    return Inventory(
-        environment=environment,
-        core_stack=core_stack,
-        app_stack=app_stack,
-        app_stack_exists=aws.stacks.get_stack(app_stack) is not None,
-        tables=tuple(tables),
-        unmanaged_tables=tuple(unmanaged),
-        buckets=tuple(sorted(buckets)),
-    )
+    if aws.stacks.get_stack(app_stack) is not None:
+        raise TeardownRefused(f"{app_stack} still exists; retribalize-core must delete it before the buckets can go")
+    tables = [name for name in aws.tables.list_names(table_prefix(environment)) if is_managed_by_environment(aws.tables.tags(name), environment)]
+    if tables:
+        raise TeardownRefused(f"retribalize-core must delete the tables of {environment} first: {', '.join(tables)}")
 
 
 def teardown(
@@ -117,20 +104,9 @@ def teardown(
     check_deletable(environment, stack, declared_names)
 
     found = inventory(environment, aws)
-    if found.app_stack_exists:
-        log(f"{environment}: deleting {found.app_stack}")
-        aws.stacks.delete_stack(found.app_stack)
-    for name in found.tables:
-        # Re-read tags immediately before deleting; never trust an earlier listing.
-        if not is_managed_by_environment(aws.tables.tags(name), environment):
-            raise TeardownRefused(f"table {name} lost its ownership tags; refusing to delete")
-        log(f"{environment}: deleting table {name}")
-        aws.tables.delete(name)
     for name in found.buckets:
         log(f"{environment}: emptying and deleting bucket {name}")
         aws.buckets.empty_and_delete(name)
-    for name in found.unmanaged_tables:
-        log(f"{environment}: skipped unmanaged table {name}")
 
     log(f"{environment}: deleting {core_stack}")
     aws.stacks.delete_stack(core_stack)

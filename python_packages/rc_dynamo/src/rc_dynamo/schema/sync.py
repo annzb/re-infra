@@ -4,10 +4,13 @@ BaseTable declarations are the source of truth. What the code declares is
 applied; what the code does not declare is left alone.
 
 Applied automatically, no permission needed:
-  * create a declared table that does not exist;
+  * create a declared table that does not exist, with its declared table
+    options (TTL and PITR are enabled once the table is ACTIVE);
   * create a declared GSI that does not exist;
   * rebuild a declared GSI whose live key schema or projection differs, by
-    deleting and recreating that one index.
+    deleting and recreating that one index;
+  * change a declared table option in place: billing mode (to on-demand), table
+    class, streams, TTL, and *enabling* PITR or deletion protection.
 
 The third is the "declaration-first" case: the index is declared, so the
 declaration wins. It cannot lose a row -- a GSI holds only derived data -- but
@@ -18,10 +21,24 @@ be rebuilt.
 Gated behind DYNAMO_PRUNE_UNDECLARED (default false):
   * delete a live GSI that is not declared in Python.
 
+Gated behind DYNAMO_ALLOW_PROTECTION_DOWNGRADE (default false):
+  * disable PITR (discards the restore window) or deletion protection when the
+    declaration says False and the live table has it enabled.
+
 Gated behind DYNAMO_ALLOW_TABLE_RECREATE (default false):
   * dump to S3, drop, recreate and restore a table whose primary key or key
     attribute types differ. The dump bucket must already exist; it is never
-    created here. The dump is deleted only after a successful restore.
+    created here. The dump is deleted only after a successful restore. The new
+    table gets the declared options; unmanaged TTL and PITR are carried over
+    from the live table.
+
+Refused outright, whatever the permissions:
+  * a recreate of a table with deletion protection enabled, or with anything a
+    recreate cannot reproduce: an LSI, KMS encryption, replicas, on-demand
+    limits, an undeclared stream / IA table class / provisioned billing, a
+    Kinesis streaming destination or a resource policy;
+  * creating a table, or switching one, to PROVISIONED billing: capacity is
+    not modeled.
 
 Reported but never changed:
   * a live sort key or projection on an index the declaration models only
@@ -36,7 +53,8 @@ environment teardown can identify tables this tool owns. Missing tags are
 reported on a dry run but do not count as pending schema changes.
 
 See rc_dynamo.schema.diff for the classification and for the
-elements this tooling deliberately does not manage (TTL, streams, PITR, LSIs).
+elements this tooling does not model, and rc_dynamo.schema.options for the
+UNMANAGED rule: an option the declaration does not set is never turned off.
 """
 
 from __future__ import annotations
@@ -62,6 +80,11 @@ from rc_dynamo.schema.diff import (
     diff_schemas,
     resolve_projection,
 )
+from rc_dynamo.schema.options import (
+    BILLING_PAY_PER_REQUEST,
+    OPTION_NAMES,
+    UNMANAGED,
+)
 from rc_dynamo.utils import aws, numeric
 from rc_dynamo.utils.settings import Settings
 
@@ -71,7 +94,14 @@ RESERVED_TAG_KEYS = frozenset({"ManagedBy", "LifecycleOwner", "Environment"})
 PERMISSION_ENV_VARS: Mapping[Permission, str] = {
     Permission.PRUNE_UNDECLARED: "DYNAMO_PRUNE_UNDECLARED",
     Permission.ALLOW_TABLE_RECREATE: "DYNAMO_ALLOW_TABLE_RECREATE",
+    Permission.ALLOW_PROTECTION_DOWNGRADE: "DYNAMO_ALLOW_PROTECTION_DOWNGRADE",
 }
+
+# Unmanaged options a recreate copies from the table it replaces, the way an
+# unmodeled GSI projection is inherited. The other options need no copying: a
+# live value that differs from the create-time default (a stream, the IA class,
+# provisioned billing, deletion protection on) makes the recreate refuse instead.
+INHERITED_ON_RECREATE = ("point_in_time_recovery", "ttl_attribute")
 
 
 class SchemaSyncError(RuntimeError):
@@ -237,6 +267,7 @@ def _granted_permissions(settings: Settings) -> dict[Permission, bool]:
     return {
         Permission.PRUNE_UNDECLARED: settings.prune_undeclared,
         Permission.ALLOW_TABLE_RECREATE: settings.allow_table_recreate,
+        Permission.ALLOW_PROTECTION_DOWNGRADE: settings.allow_protection_downgrade,
     }
 
 
@@ -346,12 +377,41 @@ def wait_table_active(client: Any, table_name: str, *, settings: Settings | None
 # ─────────────────────────── create ───────────────────────────
 
 
+def _creation_options(
+    table_name: str,
+    declared: Mapping[str, Any],
+    live: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """The options a new table gets: declared ones, plus inherited unmanaged ones."""
+    resolved: dict[str, Any] = {}
+    for name in OPTION_NAMES:
+        value = declared.get(name, UNMANAGED)
+        if value is not UNMANAGED:
+            resolved[name] = value
+            continue
+        live_value = (live or {}).get(name, UNMANAGED)
+        if name in INHERITED_ON_RECREATE and live_value is not UNMANAGED:
+            print(
+                f"[schema-sync] {table_name}: {name} not declared; inheriting live "
+                f"{live_value!r}. Declare it in table_options to choose."
+            )
+            resolved[name] = live_value
+    if resolved.get("billing_mode", BILLING_PAY_PER_REQUEST) != BILLING_PAY_PER_REQUEST:
+        raise SchemaSyncError(
+            f"{table_name}: table_options declares {resolved['billing_mode']} billing, but "
+            f"provisioned capacity is not modeled, so {MANAGED_BY} cannot create the "
+            f"table. Declare PAY_PER_REQUEST, or create it outside this tool."
+        )
+    return resolved
+
+
 def create_table(
     table: BaseTable[Any],
     live_gsis: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     settings: Settings | None = None,
     tags: Mapping[str, str] | None = None,
+    live_options: Mapping[str, Any] | None = None,
 ) -> None:
     """Create the table from its declaration.
 
@@ -359,6 +419,9 @@ def create_table(
     before it was dropped. Projection cannot be altered in place, so an index
     whose declaration does not model one must be rebuilt with the projection it
     already had -- otherwise a recreate silently widens KEYS_ONLY to ALL.
+
+    `live_options` does the same for the table options: unmanaged TTL and PITR
+    settings of the replaced table are carried over, never silently dropped.
     """
     settings = _settings(settings)
     client = table.table.meta.client
@@ -368,6 +431,8 @@ def create_table(
     if _table_exists(client, table_name):
         print(f"[schema-sync] Table already exists: {table_name}")
         return
+
+    options = _creation_options(table_name, expected.get("options", {}), live_options)
 
     create_gsis: dict[str, Mapping[str, Any]] = dict(expected.get("gsis", {}))
 
@@ -410,10 +475,26 @@ def create_table(
         params["GlobalSecondaryIndexes"] = gsis
     if tags:
         params["Tags"] = _boto_tags(tags)
+    # The options CreateTable accepts directly. TTL and PITR have no CreateTable
+    # parameter and are applied below, once the table is ACTIVE.
+    if "table_class" in options:
+        params["TableClass"] = options["table_class"]
+    if "deletion_protection" in options:
+        params["DeletionProtectionEnabled"] = options["deletion_protection"]
+    if options.get("stream_view_type") is not None:
+        params["StreamSpecification"] = {
+            "StreamEnabled": True,
+            "StreamViewType": options["stream_view_type"],
+        }
 
     print(f"[schema-sync] Creating table: {table_name}")
     client.create_table(**params)
     wait_table_active(client, table_name, settings=settings)
+
+    if options.get("ttl_attribute") is not None:
+        _set_ttl(client, table_name, enabled=True, attribute=options["ttl_attribute"])
+    if options.get("point_in_time_recovery") is True:
+        _set_point_in_time_recovery(client, table_name, True, settings)
 
 
 def _resolved_projection(
@@ -439,6 +520,109 @@ def _resolved_projection(
             )
 
     return projection
+
+
+# ─────────────────────────── table options ───────────────────────────
+
+
+def _set_ttl(client: Any, table_name: str, *, enabled: bool, attribute: str) -> None:
+    state = "Enabling" if enabled else "Disabling"
+    print(f"[schema-sync] {state} TTL on {table_name}.{attribute}")
+    client.update_time_to_live(
+        TableName=table_name,
+        TimeToLiveSpecification={"Enabled": enabled, "AttributeName": attribute},
+    )
+
+
+def _set_point_in_time_recovery(
+    client: Any, table_name: str, enabled: bool, settings: Settings
+) -> None:
+    """Enable or disable PITR, retrying while backups are still initialising.
+
+    A freshly created table rejects UpdateContinuousBackups with
+    ContinuousBackupsUnavailableException for a short while after it turns ACTIVE.
+    """
+    state = "Enabling" if enabled else "Disabling"
+    print(f"[schema-sync] {state} point-in-time recovery on {table_name}")
+    started_at = time.monotonic()
+    while True:
+        try:
+            client.update_continuous_backups(
+                TableName=table_name,
+                PointInTimeRecoverySpecification={"PointInTimeRecoveryEnabled": enabled},
+            )
+            return
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            elapsed_seconds = time.monotonic() - started_at
+            if (
+                code != "ContinuousBackupsUnavailableException"
+                or elapsed_seconds >= settings.schema_wait_timeout_seconds
+            ):
+                raise
+            print(
+                f"[schema-sync] Continuous backups not yet available on {table_name}; "
+                f"retrying (elapsed={elapsed_seconds:.0f}s)"
+            )
+            time.sleep(settings.schema_poll_seconds)
+
+
+def _update_table_option(client: Any, table_name: str, settings: Settings, **params: Any) -> None:
+    # One UpdateTable per option: DynamoDB rejects several kinds of change in a
+    # single call (streams together with billing, for one), and each leaves the
+    # table UPDATING until it settles.
+    client.update_table(TableName=table_name, **params)
+    wait_table_active(client, table_name, settings=settings)
+
+
+def _apply_option(table: BaseTable[Any], finding: Finding, settings: Settings) -> None:
+    """Bring one declared option in line with the declaration, in place."""
+    client = table.table.meta.client
+    table_name = table.table_name
+    name, declared, live = finding.attribute, finding.declared, finding.live
+    print(f"[schema-sync] {finding.message}")
+
+    if name == "billing_mode":
+        if declared != BILLING_PAY_PER_REQUEST:
+            # diff classifies this as Remedy.NONE; never reached through the plan.
+            raise SchemaSyncError(f"{table_name}: cannot switch billing mode to {declared}")
+        _update_table_option(client, table_name, settings, BillingMode=declared)
+    elif name == "table_class":
+        _update_table_option(client, table_name, settings, TableClass=declared)
+    elif name == "deletion_protection":
+        _update_table_option(client, table_name, settings, DeletionProtectionEnabled=declared)
+    elif name == "stream_view_type":
+        # A live stream's view type cannot be changed; it is disabled first. The
+        # new stream gets a new ARN, so its consumers must be repointed.
+        if live is not None:
+            _update_table_option(
+                client, table_name, settings, StreamSpecification={"StreamEnabled": False}
+            )
+        if declared is not None:
+            _update_table_option(
+                client,
+                table_name,
+                settings,
+                StreamSpecification={"StreamEnabled": True, "StreamViewType": declared},
+            )
+    elif name == "point_in_time_recovery":
+        _set_point_in_time_recovery(client, table_name, bool(declared), settings)
+    elif name == "ttl_attribute":
+        if live is not None:
+            _set_ttl(client, table_name, enabled=False, attribute=live)
+        if declared is not None:
+            try:
+                _set_ttl(client, table_name, enabled=True, attribute=declared)
+            except ClientError as exc:
+                if live is None:
+                    raise
+                raise SchemaSyncError(
+                    f"{table_name}: TTL was disabled on {live!r} but could not be enabled "
+                    f"on {declared!r} yet ({exc}). DynamoDB allows one TTL change per "
+                    f"hour; deploy again once it has passed."
+                ) from exc
+    else:
+        raise SchemaSyncError(f"{table_name}: no in-place update for option {name!r}")
 
 
 # ─────────────────────────── dump / restore ───────────────────────────
@@ -639,20 +823,89 @@ def _delete_table(table: BaseTable[Any], settings: Settings) -> None:
     _wait_table_deleted(client, table_name, settings)
 
 
+def _unmodeled_attachments(client: Any, table_name: str) -> list[str]:
+    """Things attached to the live table that DescribeTable does not show.
+
+    Only checked before a recreate, the one operation that would destroy them.
+    Anything that cannot be checked counts as present: failing closed costs a
+    retry, failing open could cost a data feed or an access policy.
+    """
+    found: list[str] = []
+    arn = client.describe_table(TableName=table_name)["Table"].get("TableArn")
+
+    try:
+        destinations = client.describe_kinesis_streaming_destination(TableName=table_name).get(
+            "KinesisDataStreamDestinations", []
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        found.append(f"Kinesis streaming destinations (could not be checked: {code})")
+    else:
+        live = sorted(
+            str(destination.get("StreamArn"))
+            for destination in destinations
+            if destination.get("DestinationStatus") not in ("DISABLED", "DISABLING")
+        )
+        if live:
+            found.append(f"Kinesis streaming destination(s) {', '.join(live)}")
+
+    try:
+        client.get_resource_policy(ResourceArn=arn)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code != "PolicyNotFoundException":
+            found.append(f"a resource policy (could not be checked: {code})")
+    else:
+        found.append("a resource policy")
+
+    return found
+
+
+def _refuse_unsafe_recreate(table: BaseTable[Any], actual: Mapping[str, Any]) -> None:
+    """Last check before anything is dumped or dropped, against a fresh read.
+
+    The plan was classified moments ago, but this is the irreversible step, so
+    re-derive the refusal from the live table instead of trusting the plan.
+    """
+    client = table.table.meta.client
+    expected = table.expected_schema()
+    reasons = [f.message for f in diff_schemas(expected, actual).unfixable()]
+    reasons += [
+        f"{table.table_name}: the live table has {attachment}, which a recreate would destroy"
+        for attachment in _unmodeled_attachments(client, table.table_name)
+    ]
+    if reasons:
+        raise SchemaSyncError(
+            f"Refusing to recreate {table.table_name}; nothing was dumped or deleted.\n"
+            + "\n".join(f"  - {reason}" for reason in reasons)
+        )
+
+
 def _recreate_table(
     table: BaseTable[Any],
     dump_bucket: str,
     settings: Settings,
     tags: Mapping[str, str] | None,
 ) -> None:
-    # Capture the live GSIs BEFORE dropping the table: projection is immutable
-    # and unmodeled ones are inherited, so once the table is gone that
-    # information is unrecoverable and every index comes back as ALL.
-    live_gsis = table.actual_schema().get("gsis", {})
+    # Capture the live GSIs and options BEFORE dropping the table: projection is
+    # immutable and unmodeled ones are inherited, so once the table is gone that
+    # information is unrecoverable and every index comes back as ALL. Unmanaged
+    # TTL/PITR settings are inherited the same way.
+    actual = table.actual_schema()
+    _refuse_unsafe_recreate(table, actual)
+    live_gsis = actual.get("gsis", {})
+    live_options = actual.get("options", {})
+    if live_options.get("stream_view_type") is not None:
+        print(
+            f"[schema-sync] {table.table_name}: the recreated table gets a new stream ARN; "
+            f"repoint its consumers"
+        )
 
     dump_ref = _dump_table_to_s3(table, dump_bucket, settings)
     _delete_table(table, settings)
-    create_table(table, live_gsis=live_gsis, settings=settings, tags=tags)
+    create_table(
+        table, live_gsis=live_gsis, settings=settings, tags=tags, live_options=live_options
+    )
     _restore_table_from_s3(table, dump_ref, settings)
     wait_table_active(table.table.meta.client, table.table_name, settings=settings)
     _delete_dump(dump_ref, settings)
@@ -722,10 +975,12 @@ def _apply_findings(
 ) -> None:
     """Execute the remedies for one table, cheapest blast radius first.
 
-    A table recreate subsumes every index change, so if one is queued nothing
-    else needs doing. Otherwise: drop undeclared indexes first (freeing room
-    under the 20-GSI limit), then rebuild conflicting ones pairwise, then create
-    what is missing.
+    A table recreate subsumes every index and option change -- the new table is
+    built with the declared options -- so if one is queued nothing else needs
+    doing. Otherwise: apply option changes first (switching a provisioned table
+    to on-demand before an index is created on it), then drop undeclared indexes
+    (freeing room under the 20-GSI limit), then rebuild conflicting ones
+    pairwise, then create what is missing.
     """
     live_gsis = (
         table.actual_schema().get("gsis", {})
@@ -745,6 +1000,11 @@ def _apply_findings(
     if by_remedy.get(Remedy.RECREATE_TABLE):
         _recreate_table(table, require_dump_bucket(dump_bucket, settings=settings), settings, tags)
         return
+
+    # Findings arrive in OPTION_NAMES order, which puts billing mode first.
+    for finding in findings:
+        if finding.remedy in (Remedy.UPDATE_OPTIONS, Remedy.DISABLE_PROTECTION):
+            _apply_option(table, finding, settings)
 
     for finding in by_remedy.get(Remedy.DELETE_GSI, []):
         _delete_gsi(table, str(finding.index_name), settings)
@@ -787,8 +1047,12 @@ def _report_findings(diff: SchemaDiff, granted: Mapping[Permission, bool]) -> No
     for finding in diff.findings:
         if finding.remedy is Remedy.ADOPT_DECLARATION:
             prefix = "undeclared"
+        elif finding.severity is Severity.UNSUPPORTED:
+            prefix = "unsupported"
         elif finding.severity is Severity.INFO:
             prefix = "info"
+        elif finding in diff.unfixable():
+            prefix = "REFUSED"
         elif finding in diff.blocked(granted):
             prefix = "BLOCKED"
         else:
@@ -818,6 +1082,17 @@ def _sync_table(
     if not diff.requires_action(granted):
         return False
 
+    # Checked before permissions: no permission can resolve these, so asking for
+    # one would only send the operator down the wrong path.
+    unfixable = diff.unfixable()
+    if unfixable:
+        detail = "\n".join(f"  - {f.message}" for f in unfixable)
+        raise SchemaSyncError(
+            f"Cannot reconcile {table_name}; nothing was changed.\n{detail}\n"
+            f"These need a change in AWS or in the declaration; no permission flag "
+            f"resolves them."
+        )
+
     blocked = diff.blocked(granted)
     if blocked:
         needed = sorted(
@@ -829,7 +1104,7 @@ def _sync_table(
         )
         detail = "\n".join(f"  - {f.message}" for f in blocked)
         raise SchemaSyncError(
-            f"Refusing to recreate or prune {table_name} without permission.\n"
+            f"Refusing to change {table_name} without permission.\n"
             f"{detail}\n"
             f"Set {' and '.join(needed)} to allow this, after confirming the "
             f"declaration is what you want:\n"
@@ -882,6 +1157,7 @@ def sync_tables(
         f"apply={apply}, "
         f"prune_undeclared={settings.prune_undeclared}, "
         f"allow_table_recreate={settings.allow_table_recreate}, "
+        f"allow_protection_downgrade={settings.allow_protection_downgrade}, "
         f"tables={','.join(table.table_name for table in tables)}"
     )
 

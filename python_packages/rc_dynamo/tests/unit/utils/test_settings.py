@@ -18,6 +18,7 @@ def test_reads_every_setting():
             "DYNAMO_SCHEMA_WAIT_TIMEOUT_SECONDS": "30.5",
             "DYNAMO_PRUNE_UNDECLARED": "true",
             "DYNAMO_ALLOW_TABLE_RECREATE": "yes",
+            "DYNAMO_ALLOW_PROTECTION_DOWNGRADE": "on",
         }
     )
 
@@ -28,6 +29,7 @@ def test_reads_every_setting():
         schema_wait_timeout_seconds=30.5,
         prune_undeclared=True,
         allow_table_recreate=True,
+        allow_protection_downgrade=True,
     )
 
 

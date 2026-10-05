@@ -1,9 +1,10 @@
 """rc-data-transfer: copy data between DynamoDB tables or S3 buckets, by hand only.
 
     rc-data-transfer table  --source <table ARN>  --target <table ARN>  (--dry-run | --apply)
-    rc-data-transfer bucket --source <bucket ARN> --target <bucket ARN> (--dry-run | --apply) [--include-versions]
+    rc-data-transfer bucket --source <bucket ARN> --target <bucket ARN> (--dry-run | --apply --manifest <file>)
+                            [--include-versions] [--verify-content]
     rc-data-transfer resolve-copy --source-layout legacy|current --source-env <env> --source-resource <bucket>
-                                  --target-env <env> --target-resource <bucket> (--dry-run | --apply)
+                                  --target-env <env> --target-resource <bucket> (--dry-run | --apply --manifest <file>)
 
 Never run by rc-infra or by any workflow. Always dry-run first. See docs/DATA_TRANSFER.md.
 
@@ -17,6 +18,7 @@ import shlex
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from rc_infra import aws
 from rc_infra.env_config import BUCKET_LOGICAL_IDS, DEFAULT_ENVS_PATH, EnvConfigError, load_env_config
@@ -36,7 +38,7 @@ def main(argv: Sequence[str] | None = None, clients: Clients | None = None) -> i
     if args.command == "table":
         report = transfer_table(clients, args.source, args.target, apply=args.apply)
     elif args.command == "bucket":
-        report = transfer_bucket(clients, args.source, args.target, apply=args.apply, include_versions=args.include_versions)
+        report = transfer_bucket(clients, args.source, args.target, **_bucket_options(args))
     else:
         resolved = _resolve(args, clients, parser.error)
         if resolved is None:
@@ -44,10 +46,19 @@ def main(argv: Sequence[str] | None = None, clients: Clients | None = None) -> i
         source, target = resolved
         print(f"source: {source.arn}\ntarget: {target.arn}")
         print("equivalent: " + shlex.join(_bucket_command(source, target, args)) + "\n")
-        report = transfer_bucket(clients, source, target, apply=args.apply, include_versions=args.include_versions)
+        report = transfer_bucket(clients, source, target, **_bucket_options(args))
 
     print(report.to_json() if args.format == "json" else report.to_text())
     return _exit_code(report)
+
+
+def _bucket_options(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "apply": args.apply,
+        "include_versions": args.include_versions,
+        "manifest_path": args.manifest,
+        "verify_content": args.verify_content,
+    }
 
 
 def _resolve(args: argparse.Namespace, clients: Clients, usage_error: Callable[[str], None]) -> tuple[BucketArn, BucketArn] | None:
@@ -77,7 +88,13 @@ def _resolve(args: argparse.Namespace, clients: Clients, usage_error: Callable[[
 
 def _bucket_command(source: BucketArn, target: BucketArn, args: argparse.Namespace) -> list[str]:
     command = ["rc-data-transfer", "bucket", "--source", source.arn, "--target", target.arn, "--apply" if args.apply else "--dry-run"]
-    return [*command, "--include-versions"] if args.include_versions else command
+    if args.manifest:
+        command += ["--manifest", str(args.manifest)]
+    if args.include_versions:
+        command.append("--include-versions")
+    if args.verify_content:
+        command.append("--verify-content")
+    return command
 
 
 def _exit_code(report: Report) -> int:
@@ -115,7 +132,9 @@ def _parser() -> argparse.ArgumentParser:
         ("resolve-copy", "resolve two buckets by environment and logical name, then copy"),
     ):
         command = commands.add_parser(name, parents=[common], help=help_text)
-        command.add_argument("--include-versions", action="store_true", help="copy every object version, oldest first")
+        command.add_argument("--include-versions", action="store_true", help="replay every version and delete marker, in order")
+        command.add_argument("--manifest", type=Path, help="version map and checkpoint (JSON lines); required with --apply; reuse it to resume")
+        command.add_argument("--verify-content", action="store_true", help="also compare every copied object's SHA-256 (reads every byte twice)")
         if name == "bucket":
             command.add_argument("--source", required=True, type=_arn(parse_bucket_arn))
             command.add_argument("--target", required=True, type=_arn(parse_bucket_arn))

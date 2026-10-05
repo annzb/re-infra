@@ -12,7 +12,14 @@ that the code does not model. The sync leaves all of it alone, so nothing is
 broken; but until it is declared, nothing enforces it either, and a rebuild
 inherits rather than reproduces it. `--format python` emits the declaration.
 
-`rebuild_gsi` / `recreate_table` findings are what the next deploy would change.
+`unsupported` findings are live features the model cannot express at all: an
+LSI, KMS encryption, replicas, or an undeclared stream / IA class / provisioned
+billing. They are left alone, but every table recreate is refused while one
+exists, because a recreate would destroy it.
+
+The other groups are what the next deploy would do, split by blast radius:
+changes made in place (GSI rebuilds, table options) versus a new physical table
+(`create_table` / `recreate_table`). Changes that need a permission say which.
 Check those are what you intend before deploying.
 """
 
@@ -24,7 +31,16 @@ from collections.abc import Sequence
 from typing import Any
 
 from rc_dynamo.base_table import BaseTable
-from rc_dynamo.schema.diff import Finding, FindingKind, Remedy, Severity, diff_schemas
+from rc_dynamo.schema.diff import (
+    Finding,
+    FindingKind,
+    Remedy,
+    SchemaDiff,
+    Severity,
+    diff_schemas,
+)
+from rc_dynamo.schema.options import OPTION_NAMES
+from rc_dynamo.schema.sync import PERMISSION_ENV_VARS
 from rc_dynamo.utils.settings import Settings
 
 MAX_SAMPLE_WITHOUT_OPT_IN = 5000
@@ -121,12 +137,38 @@ def undeclared_attribute_findings(table: BaseTable[Any], limit: int) -> list[Fin
 # ────────────────────────────────── codegen ──────────────────────────────────
 
 
+def _table_options_suggestion(table: BaseTable[Any], findings: Sequence[Finding]) -> list[str]:
+    """A ``table_options`` line adopting the live value of every unmodeled option.
+
+    Merged with the options already declared, so it replaces the existing one.
+    """
+    adopt = {
+        str(f.attribute): f.live
+        for f in findings
+        if f.kind in (FindingKind.UNDECLARED_TABLE_OPTION, FindingKind.UNSUPPORTED_LIVE_FEATURE)
+        and f.attribute in OPTION_NAMES
+    }
+    if not adopt:
+        return []
+    merged = {**table.table_options.managed(), **adopt}
+    lines = [
+        f"# on {type(table).__name__}:",
+        "    table_options = TableOptions(",
+    ]
+    lines += [f"        {name}={merged[name]!r}," for name in OPTION_NAMES if name in merged]
+    lines.append("    )")
+    return lines
+
+
 def python_suggestions(table: BaseTable[Any], findings: Sequence[Finding]) -> str | None:
     """Paste-ready declarations adopting whatever is live but unmodeled.
 
     Emits the *whole* gsi_schemas block, merged with what the model already
-    declares, so pasting over the existing one is correct.
+    declares, so pasting over the existing one is correct. Likewise the whole
+    ``table_options`` for the table class.
     """
+    options_lines = _table_options_suggestion(table, findings)
+    header = f"# ── {table.item_model.__name__} ({table.table_name}) ──"
     adoptable = {
         f.index_name
         for f in findings
@@ -139,7 +181,7 @@ def python_suggestions(table: BaseTable[Any], findings: Sequence[Finding]) -> st
         and f.index_name
     }
     if not adoptable:
-        return None
+        return "\n".join([header, *options_lines]) if options_lines else None
 
     item_model = table.item_model
     live = table.actual_schema()
@@ -175,9 +217,7 @@ def python_suggestions(table: BaseTable[Any], findings: Sequence[Finding]) -> st
         }
     )
 
-    lines: list[str] = [
-        f"# ── {item_model.__name__} ({table.table_name}) ──",
-    ]
+    lines: list[str] = [header]
 
     if missing_fields:
         lines += [
@@ -204,6 +244,7 @@ def python_suggestions(table: BaseTable[Any], findings: Sequence[Finding]) -> st
                 lines.append(f"            {key!r}: {spec[key]!r},")
         lines.append("        },")
     lines.append("    }")
+    lines += options_lines
 
     return "\n".join(lines)
 
@@ -215,18 +256,28 @@ def render_text(table_name: str, findings: Sequence[Finding]) -> str:
     if not findings:
         return f"{table_name}: OK -- live schema matches the declaration"
 
+    unfixable = SchemaDiff(table_name, tuple(findings)).unfixable()
     groups: dict[str, list[Finding]] = {
-        "Will change on next deploy": [],
+        "Cannot be applied (change AWS or the declaration)": [],
+        "Needs a new table on next deploy": [],
+        "Will change on next deploy (in place)": [],
+        "Unsupported live features (left alone; block any recreate)": [],
         "Undeclared (left alone)": [],
         "Info": [],
     }
     for finding in findings:
-        if finding.remedy is Remedy.ADOPT_DECLARATION:
+        if finding in unfixable:
+            groups["Cannot be applied (change AWS or the declaration)"].append(finding)
+        elif finding.remedy is Remedy.ADOPT_DECLARATION:
             groups["Undeclared (left alone)"].append(finding)
+        elif finding.severity is Severity.UNSUPPORTED:
+            groups["Unsupported live features (left alone; block any recreate)"].append(finding)
         elif finding.severity is Severity.INFO:
             groups["Info"].append(finding)
+        elif finding.needs_new_table:
+            groups["Needs a new table on next deploy"].append(finding)
         else:
-            groups["Will change on next deploy"].append(finding)
+            groups["Will change on next deploy (in place)"].append(finding)
 
     lines = [f"{table_name}:"]
     for heading, group in groups.items():
@@ -234,7 +285,10 @@ def render_text(table_name: str, findings: Sequence[Finding]) -> str:
             continue
         lines.append(f"  {heading}:")
         for finding in group:
-            lines.append(f"    [{finding.remedy}] {finding.message}")
+            gate = ""
+            if finding.required_permission is not None:
+                gate = f" (requires {PERMISSION_ENV_VARS[finding.required_permission]}=true)"
+            lines.append(f"    [{finding.remedy}] {finding.message}{gate}")
     return "\n".join(lines)
 
 
@@ -255,8 +309,12 @@ def build_report(
         lines += [
             f"Tables: {', '.join(t.table_name for t in tables)}",
             f"Permissions: DYNAMO_PRUNE_UNDECLARED={str(settings.prune_undeclared).lower()}, "
-            f"DYNAMO_ALLOW_TABLE_RECREATE={str(settings.allow_table_recreate).lower()}",
-            "Not compared: TTL, streams, PITR, tags, autoscaling, local secondary indexes",
+            f"DYNAMO_ALLOW_TABLE_RECREATE={str(settings.allow_table_recreate).lower()}, "
+            f"DYNAMO_ALLOW_PROTECTION_DOWNGRADE="
+            f"{str(settings.allow_protection_downgrade).lower()}",
+            "Not inspected: autoscaling, contributor insights, backup plans, warm "
+            "throughput, tags beyond ownership tags (sync checks Kinesis destinations "
+            "and resource policies before a recreate)",
             "",
         ]
 
@@ -292,7 +350,7 @@ def build_report(
         lines.append(
             "\n\n".join(suggestions)
             if suggestions
-            else "# Nothing to adopt: every live index is fully declared."
+            else "# Nothing to adopt: every live index and table option is fully declared."
         )
 
     return "\n".join(lines), any_findings

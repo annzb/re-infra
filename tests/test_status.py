@@ -28,10 +28,10 @@ def test_missing_stack_and_tables_are_not_created(env_config: EnvConfig, fake: F
 def test_bucket_and_table_emptiness(env_config: EnvConfig, fake: FakeAws) -> None:
     _deployed(fake, "dev")
     fake.buckets.live[bucket_name("dev", "avatars")] = 3
-    fake.tables.table_tags["rc-dev-users"] = dynamo_sync_tags("dev")
-    fake.tables.table_tags["rc-dev-messages"] = dynamo_sync_tags("dev")
-    fake.tables.items["rc-dev-messages"] = 1
-    fake.tables.table_tags["rc-dev-unmanaged"] = {}
+    fake.tables.table_tags["rc2-dev-users"] = dynamo_sync_tags("dev")
+    fake.tables.table_tags["rc2-dev-messages"] = dynamo_sync_tags("dev")
+    fake.tables.items["rc2-dev-messages"] = 1
+    fake.tables.table_tags["rc2-dev-unmanaged"] = {}
 
     states = _states(environment_status(env_config.get("dev"), fake.aws))
 

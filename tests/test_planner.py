@@ -4,7 +4,7 @@ from typing import Any
 
 from rc_infra.aws import ResourceChange
 from rc_infra.env_config import EnvConfig
-from rc_infra.planner import IDENTITY_TARGET, PLATFORM_TARGET, Action, ActionKind, Plan, build_plan, render_text
+from rc_infra.planner import PLATFORM_TARGET, Action, ActionKind, Plan, build_plan, render_text
 from tests.fakes import (
     FakeAws,
     add_removed_environment,
@@ -20,18 +20,44 @@ def _by_target(plan: Plan) -> dict[str, Action]:
 
 def _all_stacks_exist(fake: FakeAws, env_config: EnvConfig) -> None:
     fake.stacks.add("rc-platform", tags={"ManagedBy": "re-infra", "Component": "platform"})
-    fake.stacks.add("rc-identity", tags={"ManagedBy": "re-infra", "Component": "identity"})
     for env in env_config.environments:
         fake.stacks.add(env.core_stack, tags=env_stack_tags(env.name))
 
 
-def test_empty_account_creates_everything(env_config: EnvConfig, fake: FakeAws) -> None:
+def test_empty_account_creates_platform_and_environments_only(env_config: EnvConfig, fake: FakeAws) -> None:
     plan = build_plan(env_config, fake.aws)
     actions = _by_target(plan)
-    assert set(actions) == {PLATFORM_TARGET, IDENTITY_TARGET, *env_config.names}
-    assert {action.kind for action in plan.actions} == {ActionKind.CREATE}
-    assert actions[IDENTITY_TARGET].stack == "rc-identity"
+    # identity.yaml and pipeline.yaml are deliberately not deployed.
+    assert set(actions) == {PLATFORM_TARGET, *env_config.names}
+    assert {action.kind for action in actions.values()} == {ActionKind.CREATE}
     assert fake.events == []
+
+
+def test_stack_not_owned_by_re_infra_is_never_updated(env_config: EnvConfig, fake: FakeAws) -> None:
+    _all_stacks_exist(fake, env_config)
+    fake.stacks.add("rc-env-dev", tags={"ManagedBy": "someone-else"})
+
+    action = _by_target(build_plan(env_config, fake.aws))["dev"]
+
+    assert action.kind is ActionKind.BLOCKED
+    assert "not owned by re-infra" in action.details[0]
+
+
+def test_replacing_a_bucket_is_blocked(env_config: EnvConfig, fake: FakeAws) -> None:
+    _all_stacks_exist(fake, env_config)
+    fake.stacks.previews["rc-env-preview2"] = [ResourceChange("Modify", "AvatarsBucket", "AWS::S3::Bucket", replacement="True")]
+
+    assert _by_target(build_plan(env_config, fake.aws))["preview2"].kind is ActionKind.BLOCKED
+
+
+def test_noop_stack_without_termination_protection_is_repaired(env_config: EnvConfig, fake: FakeAws) -> None:
+    _all_stacks_exist(fake, env_config)
+
+    action = _by_target(build_plan(env_config, fake.aws))["prod"]
+
+    assert action.kind is ActionKind.NOOP
+    assert action.repair_protection
+    assert not _by_target(build_plan(env_config, fake.aws))["preview1"].repair_protection
 
 
 def test_unrelated_buckets_never_change_the_plan(env_config: EnvConfig, fake: FakeAws) -> None:
@@ -39,6 +65,16 @@ def test_unrelated_buckets_never_change_the_plan(env_config: EnvConfig, fake: Fa
     fake.buckets.live["rc-prod-avatars-273268178059"] = 12
 
     assert _by_target(build_plan(env_config, fake.aws))["prod"].kind is ActionKind.CREATE
+
+
+def test_removed_environment_with_core_leftovers_is_blocked(env_config: EnvConfig, fake: FakeAws) -> None:
+    _all_stacks_exist(fake, env_config)
+    add_removed_environment(fake, "preview42", core_leftovers=True)
+
+    action = _by_target(build_plan(env_config, fake.aws))["preview42"]
+
+    assert action.kind is ActionKind.BLOCKED
+    assert "rc-app-preview42 still exists" in action.details[0]
 
 
 def test_no_action_can_import() -> None:
@@ -55,7 +91,6 @@ def test_existing_stacks_update_or_noop(env_config: EnvConfig, fake: FakeAws) ->
     assert actions["dev"].details == ("Modify AvatarsBucket [AWS::S3::Bucket]",)
     assert actions["prod"].kind is ActionKind.NOOP
     assert actions[PLATFORM_TARGET].kind is ActionKind.NOOP
-    assert actions[IDENTITY_TARGET].kind is ActionKind.NOOP
 
 
 def test_busy_or_broken_stack_blocks(env_config: EnvConfig, fake: FakeAws) -> None:
@@ -80,18 +115,15 @@ def test_rolled_back_stack_is_recreated(env_config: EnvConfig, fake: FakeAws) ->
 def test_removed_environment_is_deleted(env_config: EnvConfig, fake: FakeAws) -> None:
     _all_stacks_exist(fake, env_config)
     add_removed_environment(fake, "preview42")
-    fake.tables.table_tags["rc-preview420-users"] = dynamo_sync_tags("preview420")
+    fake.tables.table_tags["rc2-preview420-users"] = dynamo_sync_tags("preview420")
 
     plan = build_plan(env_config, fake.aws)
     action = _by_target(plan)["preview42"]
 
     assert action.kind is ActionKind.DELETE
     details = "\n".join(action.details)
-    assert "delete app stack rc-app-preview42" in details
-    assert "delete table rc-preview42-users" in details
-    assert "delete table rc-preview42-messages" in details
-    assert "skip table rc-preview42-legacy" in details
-    assert "rc-preview420-users" not in details
+    assert "table" not in details
+    assert "rc-app-" not in details
     assert f"empty and delete bucket {bucket_name('preview42', 'avatars')}" in details
     assert action.details.index("delete stack rc-env-preview42") > max(
         i for i, d in enumerate(action.details) if d.startswith("empty and delete bucket")
@@ -137,21 +169,6 @@ def test_blocked_and_deleted_are_listed_first(env_config: EnvConfig, fake: FakeA
 # ── shared stacks ──────────────────────────────────────────────────
 
 
-def test_replacing_a_user_pool_is_blocked(env_config: EnvConfig, fake: FakeAws) -> None:
-    _all_stacks_exist(fake, env_config)
-    fake.stacks.previews["rc-identity"] = [
-        ResourceChange("Modify", "ProdUserPool", "AWS::Cognito::UserPool", replacement="True"),
-    ]
-
-    plan = build_plan(env_config, fake.aws)
-    action = _by_target(plan)[IDENTITY_TARGET]
-
-    assert action.kind is ActionKind.BLOCKED
-    assert any("ProdUserPool" in detail for detail in action.details)
-    # Identity is shared, so this must stop the whole apply rather than skip.
-    assert plan.halting == [action]
-
-
 def test_replacing_the_shared_role_is_blocked(env_config: EnvConfig, fake: FakeAws) -> None:
     _all_stacks_exist(fake, env_config)
     fake.stacks.previews["rc-platform"] = [
@@ -161,22 +178,6 @@ def test_replacing_the_shared_role_is_blocked(env_config: EnvConfig, fake: FakeA
     plan = build_plan(env_config, fake.aws)
 
     assert plan.halting == [_by_target(plan)[PLATFORM_TARGET]]
-
-
-def test_removing_a_user_pool_is_blocked(env_config: EnvConfig, fake: FakeAws) -> None:
-    _all_stacks_exist(fake, env_config)
-    fake.stacks.previews["rc-identity"] = [ResourceChange("Remove", "DevUserPoolDomain", "AWS::Cognito::UserPoolDomain")]
-
-    assert _by_target(build_plan(env_config, fake.aws))[IDENTITY_TARGET].kind is ActionKind.BLOCKED
-
-
-def test_in_place_identity_changes_are_allowed(env_config: EnvConfig, fake: FakeAws) -> None:
-    _all_stacks_exist(fake, env_config)
-    fake.stacks.previews["rc-identity"] = [
-        ResourceChange("Modify", "ProdUserPoolClient", "AWS::Cognito::UserPoolClient", replacement="False"),
-    ]
-
-    assert _by_target(build_plan(env_config, fake.aws))[IDENTITY_TARGET].kind is ActionKind.UPDATE
 
 
 def test_a_blocked_preview_does_not_halt_the_plan(env_config: EnvConfig, fake: FakeAws) -> None:

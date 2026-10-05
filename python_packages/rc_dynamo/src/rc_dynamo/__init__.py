@@ -13,10 +13,12 @@ from rc_dynamo.base_table import (
     QueryPlan,
     TableError,
 )
+from rc_dynamo.schema.options import UNMANAGED, TableOptions
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "UNMANAGED",
     "BaseItem",
     "BaseTable",
     "ItemAlreadyExistsError",
@@ -25,4 +27,5 @@ __all__ = [
     "KeyType",
     "QueryPlan",
     "TableError",
+    "TableOptions",
 ]

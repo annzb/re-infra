@@ -6,8 +6,9 @@ Description: >
 
 # Conventions (rc-infra parses this file with yaml.safe_load):
 #   - Long-form intrinsics only (Fn::Sub, Ref), never !Sub / !Ref.
-#   - Every bucket is Retain. Deleting the stack never deletes data; rc-infra
-#     empties and deletes preview buckets explicitly during teardown.
+#   - Every bucket is RetainExceptOnCreate. Deleting the stack never deletes data;
+#     rc-infra empties and deletes preview buckets explicitly during teardown. A
+#     first create that rolls back removes the (still empty) buckets it made.
 #   - No BucketName: CloudFormation generates rc-env-<environment>-<logical id>-<suffix>,
 #     which teardown relies on. Callers read the names from the outputs below
 #     (`rc-infra outputs`), never reconstruct them.
@@ -21,7 +22,7 @@ Description: >
 Resources:
   EmbeddingsBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BucketEncryption:
@@ -43,7 +44,7 @@ Resources:
 
   UserCorpusBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BucketEncryption:
@@ -67,16 +68,15 @@ Resources:
             AllowedMethods: [PUT]
             AllowedOrigins: ["*"]
 
-  # The one public bucket. It serves avatars, project banners, user galleries, blog
-  # covers and event photos straight to browsers through a bucket policy granting
-  # s3:GetObject on those prefixes. The policy itself is NOT declared here: its
-  # statement list differs per environment, and it is managed outside this template.
+  # The one public bucket. AvatarsBucketPolicy below serves its public prefixes
+  # straight to browsers; everything else in it stays private and is read through
+  # presigned URLs (retribalize-core aws_utils/s3.py presign_get).
   #
   # Public access must therefore stay unblocked. Setting BlockPublicPolicy would
   # reject that policy and every image in the product would stop loading.
   AvatarsBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BucketEncryption:
@@ -96,9 +96,35 @@ Resources:
             ExposedHeaders: [ETag]
             MaxAge: 3600
 
+  # Public read on exactly the prefixes retribalize-core serves by plain URL. The old
+  # per-environment policies also opened event-photos/, project-documents/ and (on
+  # preview) residency-photos/, which core itself treats as private and presigns, so
+  # they stay private here: no feature depends on them being public.
+  AvatarsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket:
+        Ref: AvatarsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadImages
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource:
+              - Fn::Sub: "${AvatarsBucket.Arn}/avatars/*"
+              - Fn::Sub: "${AvatarsBucket.Arn}/project-banners/*"
+              - Fn::Sub: "${AvatarsBucket.Arn}/project-galleries/*"
+              - Fn::Sub: "${AvatarsBucket.Arn}/user-banners/*"
+              - Fn::Sub: "${AvatarsBucket.Arn}/user-galleries/*"
+              - Fn::Sub: "${AvatarsBucket.Arn}/blog-covers/*"
+
   RecordingsBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BucketEncryption:
@@ -113,7 +139,7 @@ Resources:
 
   SchemaDumpsBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BucketEncryption:
@@ -135,13 +161,15 @@ Resources:
   # definition that is overwritten by mistake has to be recoverable.
   PropertyRegistryBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+            # As on the live registry buckets (core's creation script set it).
+            BucketKeyEnabled: true
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true

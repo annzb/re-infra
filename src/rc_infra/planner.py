@@ -5,6 +5,7 @@ Creating and discarding a change set to preview an update is the only write.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -12,7 +13,6 @@ from pathlib import Path
 from rc_infra.aws import Aws, ResourceChange, Stack
 from rc_infra.env_config import (
     CORE_STACK_PREFIX,
-    IDENTITY_STACK_NAME,
     PLATFORM_STACK_NAME,
     PROTECTED_ENVIRONMENTS,
     EnvConfig,
@@ -21,23 +21,22 @@ from rc_infra.env_config import (
 from rc_infra.teardown import TeardownRefused, check_deletable, inventory
 from rc_infra.templates import (
     ENVIRONMENT_TEMPLATE_PATH,
-    IDENTITY_TEMPLATE_PATH,
     MANAGED_BY_TAG,
     MANAGED_BY_VALUE,
     PLATFORM_TEMPLATE_PATH,
     environment_tags,
-    identity_tags,
     load_template,
     platform_tags,
     template_body,
 )
 
 PLATFORM_TARGET = "platform"
-IDENTITY_TARGET = "identity"
-SHARED_TARGETS = frozenset({PLATFORM_TARGET, IDENTITY_TARGET})
+SHARED_TARGETS = frozenset({PLATFORM_TARGET})
 
-# Replacing any of these destroys something irreplaceable: a user pool holds real
-# accounts, and the shared Lambda role is named by ARN in every application function.
+# Replacing any of these destroys something irreplaceable or silently repoints its
+# consumers at a new, empty copy: a user pool holds real accounts, the shared Lambda
+# role is named by ARN in every application function, and buckets, repositories and
+# tables hold data that Retain would strand in an orphan nobody reads any more.
 # main.yml applies unattended, so a plan that would replace one is refused outright
 # rather than being left to a reviewer to notice.
 REPLACEMENT_PROTECTED_TYPES = frozenset(
@@ -45,7 +44,11 @@ REPLACEMENT_PROTECTED_TYPES = frozenset(
         "AWS::Cognito::UserPool",
         "AWS::Cognito::UserPoolClient",
         "AWS::Cognito::UserPoolDomain",
+        "AWS::Cognito::UserPoolIdentityProvider",
+        "AWS::DynamoDB::Table",
+        "AWS::ECR::Repository",
         "AWS::IAM::Role",
+        "AWS::S3::Bucket",
     }
 )
 _REPLACEMENT_VALUES = frozenset({"True", "Conditional"})
@@ -73,17 +76,47 @@ class StackSpec:
     tags: dict[str, str]
     # Termination protection is turned on after every deploy.
     protect: bool
+    parameters: Mapping[str, str] = field(default_factory=dict)
 
 
+# Comment from LLM (plan2 rollback, 2026-10-05): only rc-platform and the environment
+# stacks are deployed, for simplicity. infra/identity.yaml (Cognito pools: they stay with
+# retribalize-core and are only referenced by ID in envs.yaml) and infra/pipeline.yaml
+# (CodeBuild: images may all be built in GitHub Actions instead) are kept in the repo in
+# case they are wanted later, but deliberately left out of this list.
 def stack_specs(config: EnvConfig) -> list[StackSpec]:
+    """Every stack apply deploys, in dependency order: shared foundations first."""
     return [
         StackSpec(PLATFORM_TARGET, PLATFORM_STACK_NAME, PLATFORM_TEMPLATE_PATH, platform_tags(), protect=True),
-        StackSpec(IDENTITY_TARGET, IDENTITY_STACK_NAME, IDENTITY_TEMPLATE_PATH, identity_tags(), protect=True),
         *(
             StackSpec(env.name, env.core_stack, ENVIRONMENT_TEMPLATE_PATH, environment_tags(env), protect=env.protected)
             for env in config.environments
         ),
     ]
+
+
+class DestructiveChange(Exception):
+    """A change set would replace or remove a protected resource."""
+
+
+def refuse_destructive(changes: list[ResourceChange]) -> None:
+    """Raise if any change replaces or removes a protected resource.
+
+    The planner runs this on its preview; apply runs it again on the change set it is
+    about to execute, because that is a new change set and the stack may have drifted
+    or been changed by someone else since the preview.
+    """
+    destructive = [c for c in changes if _is_destructive(c)]
+    if destructive:
+        raise DestructiveChange(
+            "\n".join(
+                [
+                    "refusing to replace or remove resources that cannot be rebuilt:",
+                    *(c.describe() for c in destructive),
+                    "if this is intended, do it by hand -- apply will never carry it out",
+                ]
+            )
+        )
 
 
 def is_halting(target: str) -> bool:
@@ -104,6 +137,8 @@ class Action:
     details: tuple[str, ...] = ()
     # The existing stack must be deleted first (its creation rolled back).
     replace_failed_stack: bool = False
+    # A NOOP stack whose termination protection was turned off; apply turns it back on.
+    repair_protection: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,6 +180,16 @@ def _plan_stack(spec: StackSpec, body: str, aws: Aws) -> Action:
     if stack is None or stack.is_pending_review or stack.is_failed_create:
         replace = stack is not None and stack.is_failed_create
         return Action(ActionKind.CREATE, spec.target, spec.stack, replace_failed_stack=replace)
+    foreign = {key: stack.tags.get(key) for key, value in spec.tags.items() if stack.tags.get(key) != value}
+    if foreign:
+        # A stack of this name that re-infra did not create is never taken over by
+        # deploying over it, and never "adopted" by applying our tags to it.
+        return Action(
+            ActionKind.BLOCKED,
+            spec.target,
+            spec.stack,
+            details=(f"{spec.stack} exists but is not owned by re-infra (mismatched tags: {foreign}); refusing to update it",),
+        )
     if stack.is_busy or stack.is_broken:
         return Action(
             ActionKind.BLOCKED,
@@ -152,21 +197,15 @@ def _plan_stack(spec: StackSpec, body: str, aws: Aws) -> Action:
             spec.stack,
             details=(f"stack status is {stack.status}; resolve it before applying",),
         )
-    changes = aws.stacks.preview(spec.stack, body, spec.tags)
+    changes = aws.stacks.preview(spec.stack, body, spec.tags, spec.parameters)
     if not changes:
-        return Action(ActionKind.NOOP, spec.target, spec.stack)
-    destructive = [c for c in changes if _is_destructive(c)]
-    if destructive:
-        return Action(
-            ActionKind.BLOCKED,
-            spec.target,
-            spec.stack,
-            details=(
-                "refusing to replace or remove resources that cannot be rebuilt:",
-                *(c.describe() for c in destructive),
-                "if this is intended, do it by hand -- apply will never carry it out",
-            ),
-        )
+        repair = spec.protect and not stack.termination_protection
+        details = ("enable termination protection",) if repair else ()
+        return Action(ActionKind.NOOP, spec.target, spec.stack, details=details, repair_protection=repair)
+    try:
+        refuse_destructive(changes)
+    except DestructiveChange as exc:
+        return Action(ActionKind.BLOCKED, spec.target, spec.stack, details=tuple(str(exc).splitlines()))
     return Action(ActionKind.UPDATE, spec.target, spec.stack, details=tuple(c.describe() for c in changes))
 
 

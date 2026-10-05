@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 from rc_infra.transfer import dynamodb
 from rc_infra.transfer.arns import ArnError, parse_bucket_arn, parse_table_arn
@@ -233,8 +235,29 @@ def buckets(clients: FakeClients) -> FakeClients:
     return clients
 
 
-def test_bucket_copy_preserves_bytes_headers_metadata_and_tags(buckets: FakeClients) -> None:
-    report = transfer_bucket(buckets, OLD, NEW, apply=True, include_versions=False)
+@pytest.fixture
+def versioned(buckets: FakeClients) -> FakeClients:
+    """A versioned source with history and a deleted key, and a versioned target."""
+    s3 = buckets.s3_client
+    s3.buckets["old-bucket"].versioning = "Enabled"
+    s3.buckets["new-bucket"].versioning = "Enabled"
+    s3.put("old-bucket", "z.txt", b"newer")
+    s3.put("old-bucket", "gone.txt", b"was here")
+    s3.delete("old-bucket", "gone.txt")
+    return buckets
+
+
+def _copy(clients: FakeClients, manifest: Path, **kwargs: Any) -> Any:
+    options = {"apply": True, "include_versions": False, "manifest_path": manifest, **kwargs}
+    return transfer_bucket(clients, OLD, NEW, **options)
+
+
+def _manifest(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_bucket_copy_preserves_bytes_headers_metadata_and_tags(buckets: FakeClients, tmp_path: Path) -> None:
+    report = _copy(buckets, tmp_path / "m.jsonl")
 
     assert report.outcome is Outcome.COPIED, report.to_text()
     copied = buckets.s3_client.buckets["new-bucket"].objects
@@ -248,7 +271,7 @@ def test_bucket_copy_preserves_bytes_headers_metadata_and_tags(buckets: FakeClie
     assert (report.counts.source_total, report.counts.target_total, report.counts.written) == (5, 5, 5)
 
 
-def test_bucket_dry_run_writes_nothing(buckets: FakeClients) -> None:
+def test_bucket_dry_run_writes_nothing_and_needs_no_manifest(buckets: FakeClients) -> None:
     report = transfer_bucket(buckets, OLD, NEW, apply=False, include_versions=False)
 
     assert report.outcome is Outcome.CHECKED
@@ -256,43 +279,163 @@ def test_bucket_dry_run_writes_nothing(buckets: FakeClients) -> None:
     assert buckets.s3_client.copies == []
 
 
-def test_non_empty_or_missing_target_bucket_refuses(buckets: FakeClients) -> None:
-    buckets.s3_client.put("new-bucket", "already-here")
-    assert transfer_bucket(buckets, OLD, NEW, apply=True, include_versions=False).outcome is Outcome.REFUSED
-    missing = parse_bucket_arn("arn:aws:s3:::missing-bucket")
-    assert transfer_bucket(buckets, OLD, missing, apply=True, include_versions=False).outcome is Outcome.REFUSED
+def test_apply_needs_a_manifest(buckets: FakeClients) -> None:
+    report = transfer_bucket(buckets, OLD, NEW, apply=True, include_versions=False)
+    assert report.outcome is Outcome.REFUSED and "--manifest" in report.reasons[0]
     assert buckets.s3_client.copies == []
 
 
-def test_failed_objects_fail_the_transfer(buckets: FakeClients) -> None:
+def test_non_empty_or_missing_target_bucket_refuses(buckets: FakeClients, tmp_path: Path) -> None:
+    buckets.s3_client.put("new-bucket", "already-here")
+    assert _copy(buckets, tmp_path / "m.jsonl").outcome is Outcome.REFUSED
+    missing = parse_bucket_arn("arn:aws:s3:::missing-bucket")
+    assert transfer_bucket(buckets, OLD, missing, apply=True, include_versions=False, manifest_path=tmp_path / "x").outcome is Outcome.REFUSED
+    assert buckets.s3_client.copies == []
+
+
+def test_a_target_with_only_old_versions_is_not_empty(buckets: FakeClients, tmp_path: Path) -> None:
+    """A delete marker hides a key, but the bucket still holds its history."""
+    s3 = buckets.s3_client
+    s3.buckets["new-bucket"].versioning = "Enabled"
+    s3.put("new-bucket", "hidden")
+    s3.delete("new-bucket", "hidden")
+
+    report = _copy(buckets, tmp_path / "m.jsonl")
+
+    assert report.outcome is Outcome.REFUSED
+    assert "old versions" in report.reasons[0]
+
+
+def test_failed_objects_fail_the_transfer(buckets: FakeClients, tmp_path: Path) -> None:
     buckets.s3_client.fail_copy.add("z.txt")
 
-    report = transfer_bucket(buckets, OLD, NEW, apply=True, include_versions=False)
+    report = _copy(buckets, tmp_path / "m.jsonl")
 
     assert report.outcome is Outcome.FAILED
     assert report.counts.failed == 1
     assert any(f.startswith("z.txt") for f in report.failures)
 
 
-def test_versions_are_copied_oldest_first(buckets: FakeClients) -> None:
-    s3 = buckets.s3_client
-    s3.buckets["old-bucket"].versioning = "Enabled"
-    s3.buckets["new-bucket"].versioning = "Enabled"
-    s3.put("old-bucket", "z.txt", b"newer")
-    s3.buckets["old-bucket"].delete_markers = 1
+def test_history_is_replayed_with_delete_markers(versioned: FakeClients, tmp_path: Path) -> None:
+    s3 = versioned.s3_client
 
-    report = transfer_bucket(buckets, OLD, NEW, apply=True, include_versions=True)
+    report = _copy(versioned, tmp_path / "m.jsonl", include_versions=True)
 
     assert report.outcome is Outcome.COPIED, report.to_text()
-    assert report.counts.versions == 6
-    assert [body.body for body in s3.buckets["new-bucket"].objects["z.txt"]] == [b"last", b"newer"]
-    assert any("delete marker" in note for note in report.notes)
-    copied_ids = [version_id for _, version_id in s3.copies]
-    assert copied_ids == sorted(copied_ids, key=lambda v: int(v[1:]))
+    target = s3.buckets["new-bucket"].objects
+    assert [v.body for v in target["z.txt"]] == [b"last", b"newer"]
+    # The deleted key keeps its history but is not current: it did not come back to life.
+    assert [v.delete_marker for v in target["gone.txt"]] == [False, True]
+    assert "gone.txt" not in s3._current("new-bucket")
+    assert (report.counts.versions, report.counts.delete_markers) == (7, 1)
 
 
-def test_versions_need_a_versioned_target(buckets: FakeClients) -> None:
-    report = transfer_bucket(buckets, OLD, NEW, apply=True, include_versions=True)
+def test_manifest_maps_every_source_version_to_its_target_version(versioned: FakeClients, tmp_path: Path) -> None:
+    s3 = versioned.s3_client
+    manifest = tmp_path / "m.jsonl"
+
+    _copy(versioned, manifest, include_versions=True)
+
+    entries = _manifest(manifest)
+    assert len(entries) == 8
+    by_source = {(e["key"], e["source_version"]): e for e in entries}
+    old_z = s3.buckets["old-bucket"].objects["z.txt"][0].version_id
+    new_z = s3.buckets["new-bucket"].objects["z.txt"][0].version_id
+    assert by_source[("z.txt", old_z)]["target_version"] == new_z
+    assert old_z != new_z
+    # A pinned historical revision is readable at its mapped target version.
+    assert s3.get_object(Bucket="new-bucket", Key="z.txt", VersionId=new_z)["Body"].read() == b"last"
+    assert sum(e["delete_marker"] for e in entries) == 1
+
+
+def test_an_interrupted_copy_resumes_from_the_manifest(versioned: FakeClients, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s3 = versioned.s3_client
+    manifest = tmp_path / "m.jsonl"
+    real_copy = s3.copy
+    calls = {"n": 0}
+
+    def interrupt_on_fourth(**kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise KeyboardInterrupt
+        real_copy(**kwargs)
+
+    monkeypatch.setattr(s3, "copy", interrupt_on_fourth)
+    first = _copy(versioned, manifest, include_versions=True)
+    assert first.outcome is Outcome.INTERRUPTED
+    assert len(_manifest(manifest)) == 3
+
+    monkeypatch.setattr(s3, "copy", real_copy)
+    second = _copy(versioned, manifest, include_versions=True)
+
+    assert second.outcome is Outcome.COPIED, second.to_text()
+    assert second.counts.skipped == 3
+    assert len(_manifest(manifest)) == 8
+    assert [v.body for v in s3.buckets["new-bucket"].objects["z.txt"]] == [b"last", b"newer"]
+
+
+def test_resume_refuses_a_target_the_manifest_does_not_account_for(versioned: FakeClients, tmp_path: Path) -> None:
+    manifest = tmp_path / "m.jsonl"
+    _copy(versioned, manifest, include_versions=True)
+    versioned.s3_client.put("new-bucket", "stranger", b"?")
+
+    report = _copy(versioned, manifest, include_versions=True)
+
+    assert report.outcome is Outcome.REFUSED
+    assert "does not account for" in report.reasons[0]
+
+
+def test_a_manifest_of_another_transfer_is_refused(buckets: FakeClients, tmp_path: Path) -> None:
+    manifest = tmp_path / "m.jsonl"
+    manifest.write_text(json.dumps({"source_bucket": "x", "target_bucket": "y", "key": "k", "source_version": None, "target_version": None}) + "\n")
+
+    report = _copy(buckets, manifest)
+
+    assert report.outcome is Outcome.REFUSED
+    assert buckets.s3_client.copies == []
+
+
+def test_content_verification_catches_corrupted_bytes(buckets: FakeClients, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s3 = buckets.s3_client
+    real_copy = s3.copy
+
+    def corrupt(**kwargs: Any) -> None:
+        real_copy(**kwargs)
+        if kwargs["Key"] == "z.txt":
+            s3.buckets["new-bucket"].objects["z.txt"][-1].body = b"LAST"  # same length, different bytes
+
+    monkeypatch.setattr(s3, "copy", corrupt)
+
+    assert _copy(buckets, tmp_path / "a.jsonl").outcome is Outcome.COPIED  # metadata alone cannot tell
+    s3.buckets["new-bucket"].objects.clear()
+    report = _copy(buckets, tmp_path / "b.jsonl", verify_content=True)
+
+    assert report.outcome is Outcome.FAILED
+    assert "z.txt: content differs" in report.failures
+
+
+def test_aws_errors_fail_the_transfer_instead_of_escaping(buckets: FakeClients, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def denied(**_: Any) -> None:
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "ListObjectVersions")
+
+    buckets.s3_client.buckets["old-bucket"].versioning = "Enabled"
+    buckets.s3_client.buckets["new-bucket"].versioning = "Enabled"
+    real = buckets.s3_client.list_object_versions
+
+    def deny_source(Bucket: str, **kwargs: Any) -> Any:
+        if Bucket == "old-bucket" and not kwargs.get("MaxKeys"):
+            denied()
+        return real(Bucket=Bucket, **kwargs)
+
+    monkeypatch.setattr(buckets.s3_client, "list_object_versions", deny_source)
+    report = _copy(buckets, tmp_path / "m.jsonl", include_versions=True)
+
+    assert report.outcome is Outcome.FAILED
+    assert report.reasons[0].startswith("while listing the source")
+
+
+def test_versions_need_a_versioned_target(buckets: FakeClients, tmp_path: Path) -> None:
+    report = _copy(buckets, tmp_path / "m.jsonl", include_versions=True)
     assert report.outcome is Outcome.REFUSED
     assert "versioning" in report.reasons[0]
 

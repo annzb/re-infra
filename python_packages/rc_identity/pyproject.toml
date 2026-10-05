@@ -1,0 +1,43 @@
+[project]
+name = "rc-identity"
+version = "0.1.0"
+description = "Retribalize identity: the account directory, Cognito trigger handlers and token validation."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "boto3>=1.43.36",
+    "PyJWT[crypto]>=2.9,<3",
+]
+
+[project.scripts]
+rc-identity-backfill = "rc_identity.backfill:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rc_identity"]
+
+[tool.ruff]
+line-length = 150
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

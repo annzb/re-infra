@@ -10,6 +10,11 @@ from botocore.exceptions import ClientError
 
 from rc_dynamo.base_item import BaseItem, ItemType, KeyType
 from rc_dynamo.schema.diff import SchemaDiff, diff_schemas
+from rc_dynamo.schema.options import (
+    BILLING_PROVISIONED,
+    TABLE_CLASS_STANDARD,
+    TableOptions,
+)
 from rc_dynamo.utils import numeric
 from rc_dynamo.utils.aws import dynamodb_resource
 
@@ -38,6 +43,10 @@ class BaseTable(Generic[ItemType]):
     item_model: type[ItemType]
     insert_unknown_columns_on_recreate: bool = True
     generated_pk_max_attempts: int = 1
+    # Operational settings (billing, table class, protections, TTL, streams).
+    # Every field defaults to UNMANAGED: not compared, never turned off, and
+    # inherited from the live table on a recreate. See rc_dynamo.schema.options.
+    table_options: TableOptions = TableOptions()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -61,6 +70,8 @@ class BaseTable(Generic[ItemType]):
         generated_pk_max_attempts = getattr(cls, "generated_pk_max_attempts", None)
         if not isinstance(generated_pk_max_attempts, int) or generated_pk_max_attempts < 1:
             raise TypeError(f"{cls.__name__}.generated_pk_max_attempts must be a positive integer")
+        if not isinstance(getattr(cls, "table_options", None), TableOptions):
+            raise TypeError(f"{cls.__name__}.table_options must be a TableOptions instance")
 
     def __init__(self, table: Any = None, *, resource: Any = None):
         """Bind the table lazily.
@@ -619,14 +630,23 @@ class BaseTable(Generic[ItemType]):
         attribute_types.update(explicit_attribute_types)
         return {
             "table_name": self.table_name,
-            "billing_mode": "PAY_PER_REQUEST",
             "key_schema": key_schema,
             "gsis": gsis,
             "attribute_types": attribute_types,
+            # Every option, UNMANAGED ones included; the diff skips those.
+            "options": self.table_options.as_schema(),
         }
 
     def actual_schema(self) -> dict[str, Any]:
-        response = self.table.meta.client.describe_table(TableName=self.table_name)
+        """The live table, in the same shape as expected_schema().
+
+        Three reads: DescribeTable, DescribeTimeToLive, DescribeContinuousBackups.
+        ``options`` mirrors TableOptions with live values; ``features`` holds what
+        no declaration can express (LSIs, KMS encryption, replicas, on-demand
+        limits) so the diff can refuse a recreate that would destroy it.
+        """
+        client = self.table.meta.client
+        response = client.describe_table(TableName=self.table_name)
         table = response["Table"]
         key_schema = self._parse_key_schema(table.get("KeySchema", []))
         gsis = {
@@ -636,19 +656,94 @@ class BaseTable(Generic[ItemType]):
             }
             for gsi in table.get("GlobalSecondaryIndexes", [])
         }
-        key_attrs = self._schema_key_attribute_names(key_schema, gsis)
+        lsis = {
+            lsi["IndexName"]: {
+                **self._parse_key_schema(lsi.get("KeySchema", [])),
+                **self._parse_projection(lsi.get("Projection", {})),
+            }
+            for lsi in table.get("LocalSecondaryIndexes", [])
+        }
+        # LSI sort keys are key attributes too; without them a type check on an
+        # attribute only an LSI uses would be skipped silently.
+        key_attrs = self._schema_key_attribute_names(key_schema, {**gsis, **lsis})
         attribute_types = {
             attr["AttributeName"]: attr["AttributeType"]
             for attr in table.get("AttributeDefinitions", [])
             if attr["AttributeName"] in key_attrs
         }
+        billing_mode = table.get("BillingModeSummary", {}).get("BillingMode", BILLING_PROVISIONED)
         return {
             "table_name": table["TableName"],
-            "billing_mode": table.get("BillingModeSummary", {}).get("BillingMode", "PROVISIONED"),
+            # Kept at the top level for callers that read it from here.
+            "billing_mode": billing_mode,
             "key_schema": key_schema,
             "gsis": gsis,
             "attribute_types": attribute_types,
+            "options": {
+                "billing_mode": billing_mode,
+                # Absent on tables that never changed class.
+                "table_class": table.get("TableClassSummary", {}).get(
+                    "TableClass", TABLE_CLASS_STANDARD
+                ),
+                "deletion_protection": bool(table.get("DeletionProtectionEnabled", False)),
+                "point_in_time_recovery": self._live_point_in_time_recovery(client),
+                "ttl_attribute": self._live_ttl_attribute(client),
+                "stream_view_type": self._parse_stream(table.get("StreamSpecification")),
+            },
+            "features": {
+                "local_secondary_indexes": lsis,
+                "sse": self._parse_sse(table.get("SSEDescription")),
+                "replicas": sorted(
+                    replica["RegionName"]
+                    for replica in table.get("Replicas", [])
+                    if replica.get("RegionName")
+                ),
+                "on_demand_throughput": self._parse_on_demand_throughput(
+                    table.get("OnDemandThroughput")
+                ),
+            },
         }
+
+    def _live_ttl_attribute(self, client: Any) -> str | None:
+        description = client.describe_time_to_live(TableName=self.table_name).get(
+            "TimeToLiveDescription", {}
+        )
+        # ENABLING counts as enabled and DISABLING as disabled: the change has
+        # been accepted, and treating the transition as drift would make every
+        # deploy within the hour it takes to settle try to apply it again.
+        if description.get("TimeToLiveStatus") in ("ENABLED", "ENABLING"):
+            return description.get("AttributeName")
+        return None
+
+    def _live_point_in_time_recovery(self, client: Any) -> bool:
+        description = client.describe_continuous_backups(TableName=self.table_name).get(
+            "ContinuousBackupsDescription", {}
+        )
+        status = description.get("PointInTimeRecoveryDescription", {}).get(
+            "PointInTimeRecoveryStatus"
+        )
+        return status in ("ENABLED", "ENABLING")
+
+    @staticmethod
+    def _parse_stream(stream: Mapping[str, Any] | None) -> str | None:
+        if not stream or not stream.get("StreamEnabled"):
+            return None
+        return stream.get("StreamViewType")
+
+    @staticmethod
+    def _parse_sse(sse: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        """None for the default AWS-owned key; the KMS details otherwise."""
+        if not sse or sse.get("Status") in ("DISABLED", "DISABLING"):
+            return None
+        if sse.get("SSEType") != "KMS":
+            return None
+        return {"type": "KMS", "kms_key": sse.get("KMSMasterKeyArn")}
+
+    @staticmethod
+    def _parse_on_demand_throughput(limits: Mapping[str, Any] | None) -> dict[str, int] | None:
+        # DescribeTable reports -1 (or omits the field) when no limit is set.
+        set_limits = {key: value for key, value in (limits or {}).items() if value and value > 0}
+        return set_limits or None
 
     def schema_diff(self) -> SchemaDiff:
         """Classified differences between this table's declaration and the live one.

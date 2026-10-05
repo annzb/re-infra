@@ -2,7 +2,7 @@
 
 Exit codes (both commands):
   0  clean / success
-  1  error: blocked change, difference left after --apply, bad schema module,
+  1  error: blocked or refused change, difference left after --apply, bad schema module,
      missing dump bucket, invalid settings
   2  usage error
   3  differences found (sync dry run: pending schema changes; report: findings)
@@ -46,6 +46,8 @@ Environment:
   RC_ENVIRONMENT                     defaults for the matching flags
   DYNAMO_PRUNE_UNDECLARED=false      delete live GSIs not declared in Python
   DYNAMO_ALLOW_TABLE_RECREATE=false  dump/drop/recreate/restore on key changes
+  DYNAMO_ALLOW_PROTECTION_DOWNGRADE=false
+                                     disable PITR / deletion protection as declared
   DYNAMO_SCHEMA_POLL_SECONDS=10, DYNAMO_SCHEMA_WAIT_TIMEOUT_SECONDS=3600
   AWS_REGION, AWS_ENDPOINT_URL
 """

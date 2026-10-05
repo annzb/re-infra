@@ -1,23 +1,37 @@
 # Desired state of every Retribalize deployment environment.
 #
 # Adding an entry creates its rc-env-<name> stack on merge to main.
-# Removing an entry DELETES the environment on merge: its app stack, its
-# schema-sync tables, its buckets and their data. prod, staging and dev can
-# never be removed. Field reference: README.md.
+# Removing an entry DELETES the environment's buckets and their data on merge,
+# once retribalize-core has removed its app stack and tables (until then the
+# deletion is refused). prod, staging and dev can never be removed. Field
+# reference: README.md.
 
 schema_version: 1
 account_id: "273268178059"
 region: us-east-1
 
-# One Cognito user pool, app client and hosted UI domain per profile, in the
-# rc-identity stack (infra/identity.yaml). An environment uses the profile of the
-# same name if there is one, otherwise "preview". Their IDs are stack outputs:
-# `rc-infra outputs`.
+# Non-secret identifiers of the existing Cognito pools, app clients and hosted UI
+# domains. The pools are managed outside this repository (retribalize-core owns
+# identity); re-infra only passes these through in its deployment contract
+# (`rc-infra outputs`). An environment uses the profile of the same name if there is
+# one, otherwise "preview".
 identity_profiles:
-  prod: {}
-  staging: {}
-  dev: {}
-  preview: {}
+  prod:
+    user_pool_id: us-east-1_1GIFBpLKf
+    client_id: 10248ltom7g0tgb22si919e9ak
+    domain: rc-prod-v2.auth.us-east-1.amazoncognito.com
+  staging:
+    user_pool_id: us-east-1_udXBXbTYS
+    client_id: 357qproe69l0qdbjm6v871ve8t
+    domain: rc-staging-v2.auth.us-east-1.amazoncognito.com
+  dev:
+    user_pool_id: us-east-1_cbi939AdR
+    client_id: 3slkc1h9k7uhqd3v52dkvk04li
+    domain: rc-dev-v2.auth.us-east-1.amazoncognito.com
+  preview:
+    user_pool_id: us-east-1_LwH5lWQ0q
+    client_id: 1e8lodbfnn00pbkq7rj1n5smfo
+    domain: rc-preview-v2.auth.us-east-1.amazoncognito.com
 
 environments:
   prod: {}

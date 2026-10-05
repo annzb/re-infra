@@ -37,6 +37,9 @@ class Counts:
     failed: int = 0
     bytes: int = 0
     versions: int = 0
+    delete_markers: int = 0
+    # Already recorded in the manifest by an earlier, interrupted run.
+    skipped: int = 0
     source_total: int | None = None
     target_total: int | None = None
 

@@ -1,25 +1,34 @@
 AWSTemplateFormatVersion: "2010-09-09"
+# ── Comment from LLM (plan2 rollback, 2026-10-05) ───────────────────────────────
+# NOT DEPLOYED. `rc-infra apply` deploys only rc-platform and the rc-env-* stacks
+# (src/rc_infra/planner.py, stack_specs). This template is kept in the repository in
+# case it is wanted later, and is deliberately ignored for simplicity: the existing
+# Cognito pools stay managed by retribalize-core and are only referenced by ID in
+# envs.yaml. The adoption tooling that imported them was removed (see git history).
+# ─────────────────────────────────────────────────────────────────────────────────
 Description: >
-  Retribalize identity resources (stack rc-identity): one Cognito user pool, app
-  client and hosted UI domain per identity profile in envs.yaml. Deployed by
-  `rc-infra apply`; do not deploy by hand.
+  Retribalize identity resources (stack rc-identity): per identity profile in
+  envs.yaml, the Cognito user pool, its app client, hosted UI domain and identity
+  providers. The pools are the existing ones, adopted with `rc-infra adopt-identity`;
+  afterwards `rc-infra apply` updates them. Never deploy by hand.
 
 # Conventions (rc-infra parses this file with yaml.safe_load):
 #   - Long-form intrinsics only (Fn::GetAtt with a list, Ref), never !GetAtt.
-#   - Everything here is Retain, and rc-infra refuses any plan that would replace
-#     or remove a pool, client or domain: a replaced pool loses every account in it.
-#   - The YAML anchor below is resolved by yaml.safe_load; rc-infra re-serializes
+#   - Everything here is Retain, and rc-infra refuses any plan that would replace,
+#     remove or newly create a pool, client, domain or provider: these resources are
+#     only ever imported. A replaced pool loses every account and password in it.
+#   - The YAML anchors below are resolved by yaml.safe_load; rc-infra re-serializes
 #     the result to JSON (templates.py), so CloudFormation never sees an alias.
 #   - Logical IDs follow <Profile>UserPool / <Profile>UserPoolClient /
-#     <Profile>UserPoolDomain; env_config.py checks every profile has all three.
-#   - Pool names and domain prefixes carry the -v3 generation suffix so this stack
-#     can be created while the older pools still exist. Domain prefixes are
-#     globally unique, which is why CloudFormation cannot generate them.
-#   - No LambdaConfig: the trigger functions belong to retribalize-core and are
-#     wired in a later stack update, once core has deployed against these pools.
-#   - No identity providers: AWS::Cognito::UserPoolIdentityProvider carries the
-#     provider client secret, so the clients support COGNITO only for now.
-#     See infra/identity.md.
+#     <Profile>UserPoolDomain / <Profile><Provider>Provider; env_config.py and
+#     identity_adoption.py rely on the convention.
+#   - Every property mirrors the live pools (`scripts/aws-audit.sh`). Cognito's
+#     UpdateUserPool rewrites the whole pool, so a setting missing here would be
+#     reset by the next unrelated update. Change a live setting only through this file.
+#   - Per-profile values (SES sender, triggers, redirect URLs) are parameters that
+#     rc-infra fills from envs.yaml; nothing here names an environment.
+#   - Provider client secrets and the Apple private key are never in this file: they
+#     are dynamic references into the Secrets Manager secret OAuthSecretName.
 
 Metadata:
   cfn-lint:
@@ -28,10 +37,102 @@ Metadata:
         - W1100  # YAML merge keys: resolved at parse time, never sent to CloudFormation
         - W1101  # YAML aliases: same
 
+Parameters:
+  OAuthSecretName:
+    Type: String
+    Default: rc-identity/oauth-providers
+    Description: >
+      Secrets Manager secret (JSON) with google_client_secret, discord_client_secret,
+      linkedin_client_secret and apple_private_key.
+  ProdEmailFrom:
+    Type: String
+  ProdEmailSourceArn:
+    Type: String
+  ProdRedirectUrls:
+    Type: CommaDelimitedList
+  ProdPostConfirmationArn:
+    Type: String
+    Default: ""
+  ProdUserMigrationArn:
+    Type: String
+    Default: ""
+  ProdPreTokenGenerationArn:
+    Type: String
+    Default: ""
+  StagingEmailFrom:
+    Type: String
+  StagingEmailSourceArn:
+    Type: String
+  StagingRedirectUrls:
+    Type: CommaDelimitedList
+  StagingPostConfirmationArn:
+    Type: String
+    Default: ""
+  StagingUserMigrationArn:
+    Type: String
+    Default: ""
+  StagingPreTokenGenerationArn:
+    Type: String
+    Default: ""
+  DevEmailFrom:
+    Type: String
+  DevEmailSourceArn:
+    Type: String
+  DevRedirectUrls:
+    Type: CommaDelimitedList
+  DevPostConfirmationArn:
+    Type: String
+    Default: ""
+  DevUserMigrationArn:
+    Type: String
+    Default: ""
+  DevPreTokenGenerationArn:
+    Type: String
+    Default: ""
+  PreviewEmailFrom:
+    Type: String
+  PreviewEmailSourceArn:
+    Type: String
+  PreviewRedirectUrls:
+    Type: CommaDelimitedList
+  PreviewPostConfirmationArn:
+    Type: String
+    Default: ""
+  PreviewUserMigrationArn:
+    Type: String
+    Default: ""
+  PreviewPreTokenGenerationArn:
+    Type: String
+    Default: ""
+Conditions:
+  ProdHasPostConfirmation:
+    Fn::Not: [Fn::Equals: [Ref: ProdPostConfirmationArn, ""]]
+  ProdHasUserMigration:
+    Fn::Not: [Fn::Equals: [Ref: ProdUserMigrationArn, ""]]
+  ProdHasPreTokenGeneration:
+    Fn::Not: [Fn::Equals: [Ref: ProdPreTokenGenerationArn, ""]]
+  StagingHasPostConfirmation:
+    Fn::Not: [Fn::Equals: [Ref: StagingPostConfirmationArn, ""]]
+  StagingHasUserMigration:
+    Fn::Not: [Fn::Equals: [Ref: StagingUserMigrationArn, ""]]
+  StagingHasPreTokenGeneration:
+    Fn::Not: [Fn::Equals: [Ref: StagingPreTokenGenerationArn, ""]]
+  DevHasPostConfirmation:
+    Fn::Not: [Fn::Equals: [Ref: DevPostConfirmationArn, ""]]
+  DevHasUserMigration:
+    Fn::Not: [Fn::Equals: [Ref: DevUserMigrationArn, ""]]
+  DevHasPreTokenGeneration:
+    Fn::Not: [Fn::Equals: [Ref: DevPreTokenGenerationArn, ""]]
+  PreviewHasPostConfirmation:
+    Fn::Not: [Fn::Equals: [Ref: PreviewPostConfirmationArn, ""]]
+  PreviewHasUserMigration:
+    Fn::Not: [Fn::Equals: [Ref: PreviewUserMigrationArn, ""]]
+  PreviewHasPreTokenGeneration:
+    Fn::Not: [Fn::Equals: [Ref: PreviewPreTokenGenerationArn, ""]]
+
 Resources:
-  # The four pools differ only in UserPoolName; everything else is shared through
-  # the anchor on ProdUserPool. Changing Schema, UsernameAttributes or
-  # AliasAttributes forces replacement.
+  # The pools differ only in name, SES sender and triggers; everything else is
+  # shared through the anchor on ProdUserPool.
   ProdUserPool:
     Type: AWS::Cognito::UserPool
     DeletionPolicy: Retain
@@ -44,18 +145,11 @@ Resources:
       AdminCreateUserConfig:
         UnusedAccountValidityDays: 7
         AllowAdminCreateUserOnly: false
-      AliasAttributes: []
       AutoVerifiedAttributes:
       - email
-      DeletionProtection: INACTIVE
-      EmailConfiguration:
-        SourceArn: arn:aws:ses:us-east-1:273268178059:identity/no-reply@retribalize.ai
-        EmailSendingAccount: DEVELOPER
-        From: no-reply@retribalize.ai
-      IssuerConfiguration:
-        Type: ORIGINAL
-      KeyConfiguration:
-        KeyType: AWS_OWNED_KEY
+      # INACTIVE on the live pools; adopt-identity imports them as they are and the
+      # first update after the import turns protection on.
+      DeletionProtection: ACTIVE
       MfaConfiguration: 'OFF'
       Policies:
         PasswordPolicy:
@@ -68,17 +162,11 @@ Resources:
         SignInPolicy:
           AllowedFirstAuthFactors:
           - PASSWORD
-      # Only the custom attributes are declared. Cognito maintains the ~21
-      # standard OIDC attributes (email, name, sub, phone_number_verified, ...)
-      # implicitly, and none of them is marked Required on these pools except
-      # `sub`, which is always implicit. Listing them here would add nothing and
-      # would break cfn-lint's 20-character limit on an attribute name.
-      #
-      # Schema is replacement-forcing and cannot be changed in place. Adding an
-      # attribute means creating it on the deployed pools first, then recording it
-      # here -- never the other way round.
+      # Only the custom attributes are declared, by their creation names: Cognito adds
+      # the "custom:" prefix, so these are custom:user_id and custom:supabase_id.
+      # The standard OIDC attributes are implicit. Schema can only ever be added to.
       Schema:
-      - Name: custom:user_id
+      - Name: user_id
         AttributeDataType: String
         DeveloperOnlyAttribute: false
         Mutable: true
@@ -86,7 +174,7 @@ Resources:
         StringAttributeConstraints:
           MinLength: '0'
           MaxLength: '256'
-      - Name: custom:supabase_id
+      - Name: supabase_id
         AttributeDataType: String
         DeveloperOnlyAttribute: false
         Mutable: true
@@ -102,7 +190,20 @@ Resources:
       - email
       VerificationMessageTemplate:
         DefaultEmailOption: CONFIRM_WITH_CODE
-      UserPoolName: rc-prod-user-pool-v3
+      UserPoolName: rc-prod-user-pool-v2
+      EmailConfiguration:
+        EmailSendingAccount: DEVELOPER
+        From:
+          Ref: ProdEmailFrom
+        SourceArn:
+          Ref: ProdEmailSourceArn
+      LambdaConfig:
+        PostConfirmation:
+          Fn::If: [ProdHasPostConfirmation, Ref: ProdPostConfirmationArn, Ref: AWS::NoValue]
+        UserMigration:
+          Fn::If: [ProdHasUserMigration, Ref: ProdUserMigrationArn, Ref: AWS::NoValue]
+        PreTokenGeneration:
+          Fn::If: [ProdHasPreTokenGeneration, Ref: ProdPreTokenGenerationArn, Ref: AWS::NoValue]
 
   StagingUserPool:
     Type: AWS::Cognito::UserPool
@@ -110,7 +211,20 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       <<: *pool-common
-      UserPoolName: rc-staging-user-pool-v3
+      UserPoolName: rc-staging-user-pool-v2
+      EmailConfiguration:
+        EmailSendingAccount: DEVELOPER
+        From:
+          Ref: StagingEmailFrom
+        SourceArn:
+          Ref: StagingEmailSourceArn
+      LambdaConfig:
+        PostConfirmation:
+          Fn::If: [StagingHasPostConfirmation, Ref: StagingPostConfirmationArn, Ref: AWS::NoValue]
+        UserMigration:
+          Fn::If: [StagingHasUserMigration, Ref: StagingUserMigrationArn, Ref: AWS::NoValue]
+        PreTokenGeneration:
+          Fn::If: [StagingHasPreTokenGeneration, Ref: StagingPreTokenGenerationArn, Ref: AWS::NoValue]
 
   DevUserPool:
     Type: AWS::Cognito::UserPool
@@ -118,7 +232,20 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       <<: *pool-common
-      UserPoolName: rc-dev-user-pool-v3
+      UserPoolName: rc-dev-user-pool-v2
+      EmailConfiguration:
+        EmailSendingAccount: DEVELOPER
+        From:
+          Ref: DevEmailFrom
+        SourceArn:
+          Ref: DevEmailSourceArn
+      LambdaConfig:
+        PostConfirmation:
+          Fn::If: [DevHasPostConfirmation, Ref: DevPostConfirmationArn, Ref: AWS::NoValue]
+        UserMigration:
+          Fn::If: [DevHasUserMigration, Ref: DevUserMigrationArn, Ref: AWS::NoValue]
+        PreTokenGeneration:
+          Fn::If: [DevHasPreTokenGeneration, Ref: DevPreTokenGenerationArn, Ref: AWS::NoValue]
 
   PreviewUserPool:
     Type: AWS::Cognito::UserPool
@@ -126,19 +253,232 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       <<: *pool-common
-      UserPoolName: rc-preview-user-pool-v3
+      UserPoolName: rc-preview-user-pool-v2
+      EmailConfiguration:
+        EmailSendingAccount: DEVELOPER
+        From:
+          Ref: PreviewEmailFrom
+        SourceArn:
+          Ref: PreviewEmailSourceArn
+      LambdaConfig:
+        PostConfirmation:
+          Fn::If: [PreviewHasPostConfirmation, Ref: PreviewPostConfirmationArn, Ref: AWS::NoValue]
+        UserMigration:
+          Fn::If: [PreviewHasUserMigration, Ref: PreviewUserMigrationArn, Ref: AWS::NoValue]
+        PreTokenGeneration:
+          Fn::If: [PreviewHasPreTokenGeneration, Ref: PreviewPreTokenGenerationArn, Ref: AWS::NoValue]
 
-  # App clients. No client secret is generated for any of them (these are public
-  # mobile/web clients), so nothing here is sensitive.
+  # Identity providers. Identical on every pool: one client registration per
+  # provider, whose console must list every pool domain's /oauth2/idpresponse URL.
+  ProdGoogleProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: &google-provider
+        ProviderName: Google
+        ProviderType: Google
+        AttributeMapping:
+          email: email
+          username: sub
+        ProviderDetails:
+          client_id: 1077046879366-3339qkkikrq5af9ac4rdrt4b4scj211k.apps.googleusercontent.com
+          client_secret:
+            Fn::Sub: "{{resolve:secretsmanager:${OAuthSecretName}:SecretString:google_client_secret}}"
+          authorize_scopes: email profile
+      UserPoolId:
+        Ref: ProdUserPool
 
+  ProdDiscordProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: &discord-provider
+        ProviderName: Discord
+        ProviderType: OIDC
+        AttributeMapping:
+          email: email
+          name: global_name
+          picture: avatar
+          username: sub
+        ProviderDetails:
+          client_id: "1484483842080243812"
+          client_secret:
+            Fn::Sub: "{{resolve:secretsmanager:${OAuthSecretName}:SecretString:discord_client_secret}}"
+          attributes_request_method: GET
+          authorize_scopes: openid email identify
+          oidc_issuer: https://discord.com
+      UserPoolId:
+        Ref: ProdUserPool
+
+  ProdLinkedInProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: &linkedin-provider
+        ProviderName: LinkedIn
+        ProviderType: OIDC
+        AttributeMapping:
+          email: email
+          family_name: family_name
+          given_name: given_name
+          name: name
+          picture: picture
+          username: sub
+        ProviderDetails:
+          client_id: 78tn1vf3ir047t
+          client_secret:
+            Fn::Sub: "{{resolve:secretsmanager:${OAuthSecretName}:SecretString:linkedin_client_secret}}"
+          attributes_request_method: GET
+          authorize_scopes: openid profile email
+          oidc_issuer: https://www.linkedin.com/oauth
+      UserPoolId:
+        Ref: ProdUserPool
+
+  ProdAppleProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: &apple-provider
+        ProviderName: SignInWithApple
+        ProviderType: SignInWithApple
+        AttributeMapping:
+          email: email
+          name: name
+          username: sub
+        ProviderDetails:
+          client_id: com.retribalize.signin
+          team_id: F89JXLHH93
+          key_id: XGBLW528CK
+          private_key:
+            Fn::Sub: "{{resolve:secretsmanager:${OAuthSecretName}:SecretString:apple_private_key}}"
+          authorize_scopes: email name
+      UserPoolId:
+        Ref: ProdUserPool
+
+  StagingGoogleProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *google-provider
+      UserPoolId:
+        Ref: StagingUserPool
+
+  StagingDiscordProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *discord-provider
+      UserPoolId:
+        Ref: StagingUserPool
+
+  StagingLinkedInProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *linkedin-provider
+      UserPoolId:
+        Ref: StagingUserPool
+
+  StagingAppleProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *apple-provider
+      UserPoolId:
+        Ref: StagingUserPool
+
+  DevGoogleProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *google-provider
+      UserPoolId:
+        Ref: DevUserPool
+
+  DevDiscordProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *discord-provider
+      UserPoolId:
+        Ref: DevUserPool
+
+  DevLinkedInProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *linkedin-provider
+      UserPoolId:
+        Ref: DevUserPool
+
+  DevAppleProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *apple-provider
+      UserPoolId:
+        Ref: DevUserPool
+
+  PreviewGoogleProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *google-provider
+      UserPoolId:
+        Ref: PreviewUserPool
+
+  PreviewDiscordProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *discord-provider
+      UserPoolId:
+        Ref: PreviewUserPool
+
+  PreviewLinkedInProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *linkedin-provider
+      UserPoolId:
+        Ref: PreviewUserPool
+
+  PreviewAppleProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      <<: *apple-provider
+      UserPoolId:
+        Ref: PreviewUserPool
+
+  # App clients: public mobile and web clients, so no secret. Users may read every
+  # attribute but write only the standard profile ones (which federated sign-in also
+  # needs, to apply the providers' attribute mappings): custom:user_id and
+  # custom:supabase_id link an account to its application data and are written only
+  # by trusted server-side code with admin APIs. The live clients list no attributes,
+  # which Cognito treats as "all readable and writable"; adoption tightens that.
   ProdUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
-    Properties:
-      ClientName: rc-prod-app-client
-      UserPoolId:
-        Ref: ProdUserPool
+    DependsOn: [ProdGoogleProvider, ProdDiscordProvider, ProdLinkedInProvider, ProdAppleProvider]
+    Properties: &client-common
       AllowedOAuthFlows:
       - code
       AllowedOAuthFlowsUserPoolClient: true
@@ -147,14 +487,6 @@ Resources:
       - openid
       - profile
       AuthSessionValidity: 3
-      CallbackURLs:
-      - http://localhost:19006/login
-      - http://localhost:8081/login
-      - https://retribalize-core.vercel.app/login
-      - https://retribalize-prod.vercel.app/login
-      - https://retribalize.ai/login
-      - https://www.retribalize.ai/login
-      - retribalize://login
       EnablePropagateAdditionalUserContextData: false
       EnableTokenRevocation: true
       ExplicitAuthFlows:
@@ -162,172 +494,127 @@ Resources:
       - ALLOW_USER_PASSWORD_AUTH
       - ALLOW_USER_SRP_AUTH
       GenerateSecret: false
-      LogoutURLs:
-      - http://localhost:19006/login
-      - http://localhost:8081/login
-      - https://retribalize-core.vercel.app/login
-      - https://retribalize-prod.vercel.app/login
-      - https://retribalize.ai/login
-      - https://www.retribalize.ai/login
-      - retribalize://login
-      ReadAttributes: []
+      ReadAttributes:
+      - address
+      - birthdate
+      - custom:supabase_id
+      - custom:user_id
+      - email
+      - email_verified
+      - family_name
+      - gender
+      - given_name
+      - locale
+      - middle_name
+      - name
+      - nickname
+      - phone_number
+      - phone_number_verified
+      - picture
+      - preferred_username
+      - profile
+      - updated_at
+      - website
+      - zoneinfo
+      WriteAttributes:
+      - address
+      - birthdate
+      - email
+      - family_name
+      - gender
+      - given_name
+      - locale
+      - middle_name
+      - name
+      - nickname
+      - phone_number
+      - picture
+      - preferred_username
+      - profile
+      - updated_at
+      - website
+      - zoneinfo
       RefreshTokenValidity: 30
       SupportedIdentityProviders:
       - COGNITO
+      - Discord
+      - Google
+      - LinkedIn
+      - SignInWithApple
       TokenValidityUnits: {}
-      WriteAttributes: []
+      ClientName: rc-prod-app-client
+      UserPoolId:
+        Ref: ProdUserPool
+      CallbackURLs:
+        Ref: ProdRedirectUrls
+      LogoutURLs:
+        Ref: ProdRedirectUrls
 
   StagingUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    DependsOn: [StagingGoogleProvider, StagingDiscordProvider, StagingLinkedInProvider, StagingAppleProvider]
     Properties:
+      <<: *client-common
       ClientName: rc-staging-app-client
       UserPoolId:
         Ref: StagingUserPool
-      AllowedOAuthFlows:
-      - code
-      AllowedOAuthFlowsUserPoolClient: true
-      AllowedOAuthScopes:
-      - email
-      - openid
-      - profile
-      AuthSessionValidity: 3
       CallbackURLs:
-      - http://localhost:19006/login
-      - http://localhost:8081/login
-      - https://retribalize-staging.vercel.app/login
-      - retribalize://login
-      EnablePropagateAdditionalUserContextData: false
-      EnableTokenRevocation: true
-      ExplicitAuthFlows:
-      - ALLOW_REFRESH_TOKEN_AUTH
-      - ALLOW_USER_PASSWORD_AUTH
-      - ALLOW_USER_SRP_AUTH
-      GenerateSecret: false
+        Ref: StagingRedirectUrls
       LogoutURLs:
-      - http://localhost:19006/login
-      - http://localhost:8081/login
-      - https://retribalize-staging.vercel.app/login
-      - retribalize://login
-      ReadAttributes: []
-      RefreshTokenValidity: 30
-      SupportedIdentityProviders:
-      - COGNITO
-      TokenValidityUnits: {}
-      WriteAttributes: []
+        Ref: StagingRedirectUrls
 
   DevUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    DependsOn: [DevGoogleProvider, DevDiscordProvider, DevLinkedInProvider, DevAppleProvider]
     Properties:
+      <<: *client-common
       ClientName: rc-dev-app-client
       UserPoolId:
         Ref: DevUserPool
-      AllowedOAuthFlows:
-      - code
-      AllowedOAuthFlowsUserPoolClient: true
-      AllowedOAuthScopes:
-      - email
-      - openid
-      - profile
-      AuthSessionValidity: 3
       CallbackURLs:
-      - http://localhost:19006/login
-      - http://localhost:8081/login
-      - https://retribalize-dev.vercel.app/login
-      - retribalize://login
-      EnablePropagateAdditionalUserContextData: false
-      EnableTokenRevocation: true
-      ExplicitAuthFlows:
-      - ALLOW_REFRESH_TOKEN_AUTH
-      - ALLOW_USER_PASSWORD_AUTH
-      - ALLOW_USER_SRP_AUTH
-      GenerateSecret: false
+        Ref: DevRedirectUrls
       LogoutURLs:
-      - http://localhost:19006/login
-      - http://localhost:8081/login
-      - https://retribalize-dev.vercel.app/login
-      - retribalize://login
-      ReadAttributes: []
-      RefreshTokenValidity: 30
-      SupportedIdentityProviders:
-      - COGNITO
-      TokenValidityUnits: {}
-      WriteAttributes: []
+        Ref: DevRedirectUrls
 
   PreviewUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    DependsOn: [PreviewGoogleProvider, PreviewDiscordProvider, PreviewLinkedInProvider, PreviewAppleProvider]
     Properties:
-      ClientName: rc-preview-app-client
-      UserPoolId:
-        Ref: PreviewUserPool
+      <<: *client-common
+      # The preview client differs from the others exactly as the live one does.
       AccessTokenValidity: 60
-      AllowedOAuthFlows:
-      - code
-      AllowedOAuthFlowsUserPoolClient: true
-      AllowedOAuthScopes:
-      - email
-      - openid
-      - profile
-      AuthSessionValidity: 3
-      CallbackURLs:
-      - http://localhost:19006/login
-      - http://localhost:8081/login
-      - https://retribalize-preview1.vercel.app/login
-      - https://retribalize-preview2.vercel.app/login
-      - https://retribalize-preview3.vercel.app/login
-      - https://retribalize-preview4.vercel.app/login
-      - https://retribalize-preview5.vercel.app/login
-      - https://retribalize-preview6.vercel.app/login
-      - https://retribalize-preview67.vercel.app/login
-      - https://retribalize-preview7.vercel.app/login
-      - https://retribalize-preview8.vercel.app/login
-      - retribalize://login
-      EnablePropagateAdditionalUserContextData: false
-      EnableTokenRevocation: true
+      IdTokenValidity: 60
       ExplicitAuthFlows:
       - ALLOW_CUSTOM_AUTH
       - ALLOW_REFRESH_TOKEN_AUTH
       - ALLOW_USER_PASSWORD_AUTH
-      GenerateSecret: false
-      IdTokenValidity: 60
-      LogoutURLs:
-      - http://localhost:19006/login
-      - http://localhost:8081/login
-      - https://retribalize-preview1.vercel.app/login
-      - https://retribalize-preview2.vercel.app/login
-      - https://retribalize-preview3.vercel.app/login
-      - https://retribalize-preview4.vercel.app/login
-      - https://retribalize-preview5.vercel.app/login
-      - https://retribalize-preview6.vercel.app/login
-      - https://retribalize-preview67.vercel.app/login
-      - https://retribalize-preview7.vercel.app/login
-      - https://retribalize-preview8.vercel.app/login
-      - retribalize://login
-      ReadAttributes: []
-      RefreshTokenValidity: 30
-      SupportedIdentityProviders:
-      - COGNITO
       TokenValidityUnits:
         IdToken: minutes
         AccessToken: minutes
         RefreshToken: days
-      WriteAttributes: []
+      ClientName: rc-preview-app-client
+      UserPoolId:
+        Ref: PreviewUserPool
+      CallbackURLs:
+        Ref: PreviewRedirectUrls
+      LogoutURLs:
+        Ref: PreviewRedirectUrls
 
   # Hosted UI domains. The <Profile>OAuthDomain outputs carry the full hostname
-  # (<prefix>.auth.<region>.amazoncognito.com) that retribalize-core receives as
-  # its CognitoOAuthDomain parameter.
-
+  # (<prefix>.auth.<region>.amazoncognito.com).
   ProdUserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Domain: rc-prod-v3
+      Domain: rc-prod-v2
+      ManagedLoginVersion: 1
       UserPoolId:
         Ref: ProdUserPool
 
@@ -336,7 +623,8 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Domain: rc-staging-v3
+      Domain: rc-staging-v2
+      ManagedLoginVersion: 1
       UserPoolId:
         Ref: StagingUserPool
 
@@ -345,7 +633,8 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Domain: rc-dev-v3
+      Domain: rc-dev-v2
+      ManagedLoginVersion: 1
       UserPoolId:
         Ref: DevUserPool
 
@@ -354,12 +643,42 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Domain: rc-preview-v3
+      Domain: rc-preview-v2
+      ManagedLoginVersion: 1
       UserPoolId:
         Ref: PreviewUserPool
 
+  # The account directory: which stable application account each sign-in belongs to,
+  # keyed by the token's (issuer, subject). It stores identifiers only, never
+  # credentials: Cognito stays the only credential authority. Written by the
+  # rc_identity handlers and `rc-identity-backfill`; its schema is rc_identity's.
+  #
+  #   pk ACCOUNT#<account_id>         sk ACCOUNT  status, profile, created_at
+  #   pk LOGIN#<issuer>#<subject>     sk LOGIN    account_id, profile, provider, created_at
+  AccountDirectoryTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: pk
+        AttributeType: S
+      - AttributeName: sk
+        AttributeType: S
+      KeySchema:
+      - AttributeName: pk
+        KeyType: HASH
+      - AttributeName: sk
+        KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      DeletionProtectionEnabled: true
 
 Outputs:
+  AccountDirectoryTableName:
+    Value:
+      Ref: AccountDirectoryTable
   ProdUserPoolId:
     Value:
       Ref: ProdUserPool

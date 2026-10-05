@@ -8,20 +8,33 @@ from rc_infra.env_config import BUCKET_LOGICAL_IDS
 from rc_infra.templates import (
     ENVIRONMENT_TEMPLATE_PATH,
     IDENTITY_TEMPLATE_PATH,
+    PIPELINE_TEMPLATE_PATH,
     PLATFORM_TEMPLATE_PATH,
     bucket_output_keys,
-    identity_logical_ids,
-    identity_output_keys,
     load_template,
 )
 
-TEMPLATE_PATHS = (PLATFORM_TEMPLATE_PATH, IDENTITY_TEMPLATE_PATH, ENVIRONMENT_TEMPLATE_PATH)
+# Deployed by apply. identity.yaml and pipeline.yaml are kept but not deployed.
+TEMPLATE_PATHS = (PLATFORM_TEMPLATE_PATH, ENVIRONMENT_TEMPLATE_PATH)
+UNDEPLOYED_TEMPLATE_PATHS = (IDENTITY_TEMPLATE_PATH, PIPELINE_TEMPLATE_PATH)
 PLATFORM = load_template(PLATFORM_TEMPLATE_PATH)
-IDENTITY = load_template(IDENTITY_TEMPLATE_PATH)
 
 # Physical names an earlier generation of the infrastructure still holds. A template
 # that asked for one could not be created while that generation exists.
-LEGACY_NAMES = frozenset({"LambdaPower", "rc-prod-v2", "rc-staging-v2", "rc-dev-v2", "rc-preview-v2"})
+LEGACY_NAMES = frozenset(
+    {
+        "LambdaPower",
+        "rc-codebuild-deploy",
+        "rc-build",
+        "rc-deploy-dev",
+        "rc-deploy-staging",
+        "rc-deploy-prod",
+        "rc-deploy-preview",
+        "rc-deployment-locks",
+        "rc-api",
+        "rc-matching",
+    }
+)
 
 
 @pytest.fixture
@@ -31,14 +44,16 @@ def env_template() -> dict[str, Any]:
 
 def test_templates_use_long_form_intrinsics() -> None:
     # load_template uses yaml.safe_load, which fails on !Ref / !Sub tags.
-    for path in TEMPLATE_PATHS:
+    for path in (*TEMPLATE_PATHS, *UNDEPLOYED_TEMPLATE_PATHS):
         load_template(path)
 
 
 @pytest.mark.parametrize("path", TEMPLATE_PATHS, ids=str)
 def test_every_resource_is_retained(path: Any) -> None:
+    # Retained on deletion; removed only by the rollback of its own first create.
+    allowed = {"RetainExceptOnCreate"}
     for logical_id, resource in load_template(path)["Resources"].items():
-        assert resource["DeletionPolicy"] == "Retain", logical_id
+        assert resource["DeletionPolicy"] in allowed, logical_id
         assert resource["UpdateReplacePolicy"] == "Retain", logical_id
 
 
@@ -96,26 +111,16 @@ def test_platform_outputs_every_repository_uri() -> None:
     assert {f"{logical_id}Uri" for logical_id in repositories} <= set(PLATFORM["Outputs"])
 
 
-# ── rc-identity ─────────────────────────────────────────────────────
+# Prefixes retribalize-core presigns because they are private (aws_utils/s3.py presign_get).
+PRIVATE_AVATAR_PREFIXES = ("event-photos/", "residency-photos/", "service-photos/", "project-documents/", "event-documents/")
 
 
-def test_every_identity_profile_has_resources_and_outputs(env_config: Any) -> None:
-    """The <Profile>UserPool naming convention must not drift from envs.yaml."""
-    for profile in env_config.identity_profiles:
-        for logical_id in identity_logical_ids(profile):
-            assert logical_id in IDENTITY["Resources"], f"{profile}: {logical_id} missing from identity.yaml"
-        for key in identity_output_keys(profile):
-            assert key in IDENTITY["Outputs"], f"{profile}: output {key} missing from identity.yaml"
-
-
-def test_pools_have_no_triggers_yet() -> None:
-    pools = [r for r in IDENTITY["Resources"].values() if r["Type"] == "AWS::Cognito::UserPool"]
-    assert pools
-    assert all("LambdaConfig" not in pool["Properties"] for pool in pools)
-
-
-def test_clients_only_support_cognito() -> None:
-    """No identity provider is declared, so naming one would fail the create."""
-    clients = [r for r in IDENTITY["Resources"].values() if r["Type"] == "AWS::Cognito::UserPoolClient"]
-    assert clients
-    assert all(client["Properties"]["SupportedIdentityProviders"] == ["COGNITO"] for client in clients)
+def test_avatar_policy_opens_only_the_public_prefixes(env_template: dict[str, Any]) -> None:
+    policy = env_template["Resources"]["AvatarsBucketPolicy"]["Properties"]
+    assert policy["Bucket"] == {"Ref": "AvatarsBucket"}
+    (statement,) = policy["PolicyDocument"]["Statement"]
+    assert statement["Action"] == "s3:GetObject"
+    resources = [r["Fn::Sub"] for r in statement["Resource"]]
+    assert all(r.startswith("${AvatarsBucket.Arn}/") and r.endswith("/*") for r in resources)
+    assert "${AvatarsBucket.Arn}/*" not in resources
+    assert not [r for r in resources for prefix in PRIVATE_AVATAR_PREFIXES if prefix in r]

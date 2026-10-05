@@ -6,7 +6,7 @@ ordering across stacks, tables, and buckets.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -21,6 +21,8 @@ class FakeStacks:
     stacks: dict[str, Stack] = field(default_factory=dict)
     resources: dict[str, list[StackResource]] = field(default_factory=dict)
     previews: dict[str, list[ResourceChange]] = field(default_factory=dict)
+    # What the change set apply executes contains, when it differs from the preview.
+    executed: dict[str, list[ResourceChange]] = field(default_factory=dict)
     fail_deploy: set[str] = field(default_factory=set)
     deploys: list[dict[str, Any]] = field(default_factory=list)
 
@@ -48,6 +50,7 @@ class FakeStacks:
         stack_name: str,
         template_body: str,
         tags: Mapping[str, str],
+        parameters: Mapping[str, str] | None = None,
     ) -> list[ResourceChange]:
         return list(self.previews.get(stack_name, []))
 
@@ -57,7 +60,12 @@ class FakeStacks:
         kind: ChangeSetKind,
         template_body: str,
         tags: Mapping[str, str],
+        guard: Callable[[list[ResourceChange]], None] | None = None,
+        parameters: Mapping[str, str] | None = None,
     ) -> list[ResourceChange]:
+        changes = self.executed.get(stack_name, [ResourceChange("Add", "Something", "AWS::S3::Bucket")])
+        if guard is not None:
+            guard(changes)
         self.events.append(("deploy", kind.value, stack_name))
         self.deploys.append(
             {
@@ -65,6 +73,7 @@ class FakeStacks:
                 "kind": kind,
                 "template_body": template_body,
                 "tags": dict(tags),
+                "parameters": dict(parameters or {}),
             }
         )
         if stack_name in self.fail_deploy:
@@ -75,7 +84,7 @@ class FakeStacks:
             self.add(stack_name, tags=tags, status=status)
         else:
             self.stacks[stack_name] = replace(existing, status=status, tags=dict(tags))
-        return [ResourceChange("Add", "Something", "AWS::S3::Bucket")]
+        return list(changes)
 
     def set_termination_protection(self, name: str, enabled: bool) -> None:
         self.events.append(("termination_protection", name, enabled))
@@ -182,15 +191,21 @@ def env_stack_resources(environment: str) -> list[StackResource]:
     return [StackResource(logical_id, bucket_name(environment, purpose), "AWS::S3::Bucket") for purpose, logical_id in BUCKET_LOGICAL_IDS.items()]
 
 
-def add_removed_environment(fake: FakeAws, name: str = "preview42") -> None:
-    """An environment that exists in AWS but is no longer in the env_config."""
-    from rc_infra.env_config import BUCKET_LOGICAL_IDS
+def add_removed_environment(fake: FakeAws, name: str = "preview42", *, core_leftovers: bool = False) -> None:
+    """An environment that exists in AWS but is no longer in the env_config.
+
+    With core_leftovers, retribalize-core has not yet deleted its app stack and tables.
+    A table without core's ownership tags is always present: it is never core's, so it
+    never blocks teardown and is never deleted.
+    """
+    from rc_infra.env_config import BUCKET_LOGICAL_IDS, table_prefix
 
     fake.stacks.add(f"rc-env-{name}", tags=env_stack_tags(name))
     fake.stacks.resources[f"rc-env-{name}"] = env_stack_resources(name)
     for purpose in BUCKET_LOGICAL_IDS:
         fake.buckets.live[bucket_name(name, purpose)] = 0
-    fake.stacks.add(f"rc-app-{name}")
-    fake.tables.table_tags[f"rc-{name}-users"] = dynamo_sync_tags(name)
-    fake.tables.table_tags[f"rc-{name}-messages"] = dynamo_sync_tags(name)
-    fake.tables.table_tags[f"rc-{name}-legacy"] = {}
+    fake.tables.table_tags[f"{table_prefix(name)}legacy"] = {}
+    if core_leftovers:
+        fake.stacks.add(f"rc-app-{name}")
+        fake.tables.table_tags[f"{table_prefix(name)}users"] = dynamo_sync_tags(name)
+        fake.tables.table_tags[f"{table_prefix(name)}messages"] = dynamo_sync_tags(name)

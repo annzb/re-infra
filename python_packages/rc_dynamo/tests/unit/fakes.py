@@ -193,3 +193,172 @@ class FakeDynamoTable:
             self._project(it, kwargs) for it in self.items if _matches(it, filter_expression)
         ]
         return {"Items": results}
+
+
+# ───────────────────────── control plane ─────────────────────────
+
+
+def client_error(code: str, operation: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": code}}, operation)
+
+
+class _FakeWaiter:
+    def __init__(self, client: FakeDynamoClient) -> None:
+        self.client = client
+
+    def wait(self, TableName, WaiterConfig=None):
+        assert self.client.description is None, "table still exists"
+
+
+class FakeDynamoClient:
+    """In-memory stand-in for the DynamoDB *client* calls the schema tooling makes.
+
+    Holds one table's control-plane state -- DescribeTable fields, TTL, PITR,
+    Kinesis destinations, resource policy -- and applies CreateTable /
+    UpdateTable / UpdateTimeToLive / UpdateContinuousBackups to it, so a sync run
+    converges and its post-apply re-diff sees the result. Every mutating call is
+    recorded in ``calls`` as ``(operation, params)``.
+
+    ``description=None`` means the table does not exist.
+    """
+
+    def __init__(
+        self,
+        description: dict[str, Any] | None = None,
+        *,
+        ttl_attribute: str | None = None,
+        pitr: bool = False,
+        kinesis_destinations: list[dict[str, Any]] | None = None,
+        resource_policy: str | None = None,
+        pitr_unavailable_times: int = 0,
+    ) -> None:
+        self.description = description
+        self.ttl_attribute = ttl_attribute
+        self.pitr = pitr
+        self.kinesis_destinations = kinesis_destinations or []
+        self.resource_policy = resource_policy
+        self.pitr_unavailable_times = pitr_unavailable_times
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def operations(self) -> list[str]:
+        return [operation for operation, _ in self.calls]
+
+    def params_of(self, operation: str) -> list[dict[str, Any]]:
+        return [params for op, params in self.calls if op == operation]
+
+    # ── reads ──
+    def describe_table(self, TableName):
+        if self.description is None:
+            raise client_error("ResourceNotFoundException", "DescribeTable")
+        return {
+            "Table": {
+                "TableName": TableName,
+                "TableStatus": "ACTIVE",
+                "TableArn": f"arn:aws:dynamodb:us-east-1:000000000000:table/{TableName}",
+                **self.description,
+            }
+        }
+
+    def describe_time_to_live(self, TableName):
+        if self.ttl_attribute is None:
+            return {"TimeToLiveDescription": {"TimeToLiveStatus": "DISABLED"}}
+        return {
+            "TimeToLiveDescription": {
+                "TimeToLiveStatus": "ENABLED",
+                "AttributeName": self.ttl_attribute,
+            }
+        }
+
+    def describe_continuous_backups(self, TableName):
+        status = "ENABLED" if self.pitr else "DISABLED"
+        return {
+            "ContinuousBackupsDescription": {
+                "ContinuousBackupsStatus": "ENABLED",
+                "PointInTimeRecoveryDescription": {"PointInTimeRecoveryStatus": status},
+            }
+        }
+
+    def describe_kinesis_streaming_destination(self, TableName):
+        return {"TableName": TableName, "KinesisDataStreamDestinations": self.kinesis_destinations}
+
+    def get_resource_policy(self, ResourceArn):
+        if self.resource_policy is None:
+            raise client_error("PolicyNotFoundException", "GetResourcePolicy")
+        return {"Policy": self.resource_policy, "RevisionId": "1"}
+
+    def get_waiter(self, name):
+        assert name == "table_not_exists"
+        return _FakeWaiter(self)
+
+    # ── writes ──
+    def create_table(self, **params):
+        self.calls.append(("create_table", params))
+        description: dict[str, Any] = {
+            "KeySchema": params["KeySchema"],
+            "AttributeDefinitions": params["AttributeDefinitions"],
+            "GlobalSecondaryIndexes": [
+                {**gsi, "IndexStatus": "ACTIVE"} for gsi in params.get("GlobalSecondaryIndexes", [])
+            ],
+            "BillingModeSummary": {"BillingMode": params.get("BillingMode", "PROVISIONED")},
+            "DeletionProtectionEnabled": params.get("DeletionProtectionEnabled", False),
+        }
+        if "TableClass" in params:
+            description["TableClassSummary"] = {"TableClass": params["TableClass"]}
+        if "StreamSpecification" in params:
+            description["StreamSpecification"] = params["StreamSpecification"]
+        self.description = description
+
+    def update_table(self, TableName, **params):
+        self.calls.append(("update_table", params))
+        assert self.description is not None
+        if "BillingMode" in params:
+            self.description["BillingModeSummary"] = {"BillingMode": params["BillingMode"]}
+        if "TableClass" in params:
+            self.description["TableClassSummary"] = {"TableClass": params["TableClass"]}
+        if "DeletionProtectionEnabled" in params:
+            self.description["DeletionProtectionEnabled"] = params["DeletionProtectionEnabled"]
+        if "StreamSpecification" in params:
+            spec = params["StreamSpecification"]
+            if spec["StreamEnabled"]:
+                assert not self.description.get("StreamSpecification", {}).get("StreamEnabled"), (
+                    "DynamoDB rejects enabling a stream on a table that already has one"
+                )
+                self.description["StreamSpecification"] = spec
+            else:
+                self.description.pop("StreamSpecification", None)
+
+    def update_time_to_live(self, TableName, TimeToLiveSpecification):
+        self.calls.append(("update_time_to_live", TimeToLiveSpecification))
+        if TimeToLiveSpecification["Enabled"]:
+            assert self.ttl_attribute is None, "DynamoDB rejects enabling TTL twice"
+            self.ttl_attribute = TimeToLiveSpecification["AttributeName"]
+        else:
+            self.ttl_attribute = None
+
+    def update_continuous_backups(self, TableName, PointInTimeRecoverySpecification):
+        if self.pitr_unavailable_times:
+            self.pitr_unavailable_times -= 1
+            raise client_error("ContinuousBackupsUnavailableException", "UpdateContinuousBackups")
+        self.calls.append(("update_continuous_backups", PointInTimeRecoverySpecification))
+        self.pitr = PointInTimeRecoverySpecification["PointInTimeRecoveryEnabled"]
+
+    def delete_table(self, TableName):
+        self.calls.append(("delete_table", {"TableName": TableName}))
+        assert not (self.description or {}).get("DeletionProtectionEnabled"), "protected table"
+        # TTL and PITR belong to the physical table: a recreated one starts without.
+        self.description, self.ttl_attribute, self.pitr = None, None, False
+
+
+def live_description(
+    *,
+    partition_key: str = "pk",
+    billing_mode: str = "PAY_PER_REQUEST",
+    **extra: Any,
+) -> dict[str, Any]:
+    """A DescribeTable ``Table`` body for a pk-only table, plus any extra fields."""
+    return {
+        "KeySchema": [{"AttributeName": partition_key, "KeyType": "HASH"}],
+        "AttributeDefinitions": [{"AttributeName": partition_key, "AttributeType": "S"}],
+        "BillingModeSummary": {"BillingMode": billing_mode},
+        **extra,
+    }

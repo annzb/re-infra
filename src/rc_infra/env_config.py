@@ -3,8 +3,8 @@
 The config is the only place environment names are declared. Every name rc-infra
 chooses -- stack names, table prefixes -- is derived here so that planning, applying,
 and tearing down can never disagree about what belongs to an environment. Names AWS
-generates (buckets, pool and client IDs) are never derived: they are read back from
-stack outputs.
+generates (buckets) are never derived: they are read back from stack outputs. The
+existing Cognito pools are referenced by their IDs here; this repository does not manage them.
 """
 
 from __future__ import annotations
@@ -43,10 +43,17 @@ BUCKET_LOGICAL_IDS: dict[str, str] = {
 }
 
 RESOURCE_PREFIX = "rc"
+
+# The generation of application data this repository's environments hold. Tables are
+# created by retribalize-core, but their names start with a prefix chosen here, so a
+# fresh generation can never resolve to (and mutate) a table of an earlier one: the
+# old core tables are named rc-<env>-*, this generation's rc2-<env>-*. Bump it only
+# together with a deliberate data migration.
+DATA_GENERATION = 2
+TABLE_PREFIX = f"{RESOURCE_PREFIX}{DATA_GENERATION}"
 CORE_STACK_PREFIX = f"{RESOURCE_PREFIX}-env-"
 APP_STACK_PREFIX = f"{RESOURCE_PREFIX}-app-"
 PLATFORM_STACK_NAME = f"{RESOURCE_PREFIX}-platform"
-IDENTITY_STACK_NAME = f"{RESOURCE_PREFIX}-identity"
 
 
 class EnvConfigError(Exception):
@@ -62,7 +69,16 @@ class _Strict(BaseModel):
 
 
 class IdentityProfile(_Strict):
-    """A Cognito pool, client and domain in rc-identity. Nothing to configure yet."""
+    """An existing Cognito pool, app client and hosted UI domain, referenced by ID.
+
+    The pools are not managed by this repository: they stay with retribalize-core and
+    keep every account and password where it is. These are non-secret identifiers only.
+    """
+
+    user_pool_id: str = Field(pattern=r"^[a-z]{2}-[a-z]+-\d_[A-Za-z0-9]+$")
+    client_id: str = Field(min_length=1)
+    # The hosted UI hostname, e.g. rc-prod-v2.auth.us-east-1.amazoncognito.com.
+    domain: str = Field(min_length=1)
 
 
 class EnvironmentSpec(_Strict):
@@ -76,7 +92,7 @@ class EnvConfigFile(_Strict):
     identity_profiles: dict[str, IdentityProfile]
     environments: dict[str, EnvironmentSpec]
 
-    @field_validator("identity_profiles", "environments", mode="before")
+    @field_validator("environments", mode="before")
     @classmethod
     def _empty_entries_are_defaults(cls, value: Any) -> Any:
         # "preview3:" with nothing after it parses as None; treat it like "preview3: {}".
@@ -91,6 +107,7 @@ class Environment:
     account_id: str
     region: str
     identity_profile: str
+    identity: IdentityProfile
 
     @property
     def protected(self) -> bool:
@@ -116,8 +133,10 @@ class Environment:
             "region": self.region,
             "core_stack": self.core_stack,
             "app_stack": self.app_stack,
+            "data_generation": DATA_GENERATION,
             "table_prefix": self.table_prefix,
             "identity_profile": self.identity_profile,
+            "identity": self.identity.model_dump(),
         }
 
 
@@ -126,8 +145,7 @@ class EnvConfig:
     account_id: str
     region: str
     environments: tuple[Environment, ...]
-    # Kept whole, not just per environment: the identity resources belong to the
-    # rc-identity stack, which has no environment to resolve them through.
+    # Kept whole, not just per environment: several environments share one profile.
     identity_profiles: Mapping[str, IdentityProfile] = field(default_factory=dict)
 
     @property
@@ -157,7 +175,7 @@ def core_stack_name(environment: str) -> str:
 
 
 def table_prefix(environment: str) -> str:
-    return f"{RESOURCE_PREFIX}-{environment}-"
+    return f"{TABLE_PREFIX}-{environment}-"
 
 
 def environment_from_core_stack(stack_name: str) -> str | None:
@@ -214,6 +232,7 @@ def parse_env_config(raw: Any) -> EnvConfig:
                 account_id=parsed.account_id,
                 region=parsed.region,
                 identity_profile=profile_name,
+                identity=parsed.identity_profiles[profile_name],
             )
         )
 

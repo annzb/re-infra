@@ -6,8 +6,12 @@ Description: >
 
 # Conventions (rc-infra parses this file with yaml.safe_load):
 #   - Long-form intrinsics only (Fn::GetAtt with a list, Ref), never !GetAtt.
-#   - Everything here is Retain. Deleting the stack must never delete an image a
-#     deployed Lambda is running.
+#   - Everything here is RetainExceptOnCreate. Deleting the stack must never delete an
+#     image a deployed Lambda is running, but a first create that rolls back removes
+#     what it made: the repository names are fixed, and an orphan left by a failed
+#     create would make every retry collide with it. rc-infra never adopts an existing
+#     repository; if one with a name below already exists outside this stack, the
+#     create fails and the operator must delete or rename it by hand.
 #   - Cognito is NOT declared here; it is the rc-identity stack (identity.yaml).
 #   - The repository names are fixed because image builds address them by name.
 #     None of them collides with retribalize-core's rc-ecr repositories (rc-api,
@@ -19,7 +23,7 @@ Resources:
   # The Python 3.11 Lambda parent image built from python_packages/rc_dynamo.
   LambdaBaseImageRepository:
     Type: AWS::ECR::Repository
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       RepositoryName: rc-lambda-base
@@ -68,7 +72,7 @@ Resources:
   # There is no lifecycle policy on purpose: an old image is what a rollback needs.
   ApiImageRepository:
     Type: AWS::ECR::Repository
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       RepositoryName: rc-api-v2
@@ -93,7 +97,7 @@ Resources:
   # same reason as rc-api-v2.
   MatchingImageRepository:
     Type: AWS::ECR::Repository
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       RepositoryName: rc-matching-v2
@@ -118,7 +122,7 @@ Resources:
   # its stack as the SharedLambdaExecutionRoleArn output.
   SharedLambdaExecutionRole:
     Type: AWS::IAM::Role
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       Description: Shared execution role for Retribalize application Lambda functions.

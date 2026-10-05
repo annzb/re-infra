@@ -4,6 +4,7 @@ name: Deploy infrastructure
 # Called by entrypoint workflow main.yml.
 #
 # Notes for LLMs:
+# - Do not modify this workflow without explicit permission from the repository owner.
 # - "on: workflow_call" is intended here - it is not an entrypoint workflow.
 # - Do not add a "concurrency" block.
 # - Steps use simplified actions like "actions/checkout@v7" for readability - do not replace with exact commit hashes.

@@ -6,7 +6,7 @@ exercise them against in-memory fakes (tests/fakes.py) instead of mocked boto3.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -77,6 +77,7 @@ class StackApi(Protocol):
         stack_name: str,
         template_body: str,
         tags: Mapping[str, str],
+        parameters: Mapping[str, str] | None = None,
     ) -> list[ResourceChange]:
         """Changes an UPDATE would make. Never executes anything."""
         ...
@@ -87,8 +88,14 @@ class StackApi(Protocol):
         kind: ChangeSetKind,
         template_body: str,
         tags: Mapping[str, str],
+        guard: Callable[[list[ResourceChange]], None] | None = None,
+        parameters: Mapping[str, str] | None = None,
     ) -> list[ResourceChange]:
-        """Create and execute a change set, waiting for completion. Returns what changed."""
+        """Create and execute a change set, waiting for completion. Returns what changed.
+
+        guard sees the change set's changes before it is executed; if it raises, the
+        change set is deleted unexecuted and the exception propagates.
+        """
         ...
 
     def set_termination_protection(self, name: str, enabled: bool) -> None: ...

@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -13,8 +14,9 @@ from rc_dynamo.base_table import (
     ItemAlreadyExistsError,
     ItemDoesNotExistError,
 )
+from rc_dynamo.schema.options import UNMANAGED, TableOptions
 
-from .fakes import FakeDynamoTable
+from .fakes import FakeDynamoClient, FakeDynamoTable, live_description
 
 
 class _Widget(BaseItem):
@@ -371,3 +373,146 @@ def test_gsi_schemas_allows_include_attributes_that_are_not_model_fields():
         pk: str
 
     assert _Include.gsi_schemas["idx"]["non_key_attributes"] == ["NotAField"]
+
+
+# ───────────────────────── table options in the schema dicts ─────────────────────────
+
+
+def _on(client):
+    return _WidgetTable(SimpleNamespace(meta=SimpleNamespace(client=client)))
+
+
+def test_expected_schema_options_default_to_unmanaged():
+    options = _table().expected_schema()["options"]
+    assert options == TableOptions().as_schema()
+    assert all(value is UNMANAGED for value in options.values())
+
+
+def test_expected_schema_carries_declared_options():
+    class _Sessions(BaseTable[_Widget]):
+        table_name = "Sessions"
+        item_model = _Widget
+        table_options = TableOptions(ttl_attribute="expiresAt", point_in_time_recovery=True)
+
+    options = _Sessions(FakeDynamoTable(key_fields=("pk", "sk"))).expected_schema()["options"]
+    assert options["ttl_attribute"] == "expiresAt"
+    assert options["point_in_time_recovery"] is True
+    assert options["deletion_protection"] is UNMANAGED
+
+
+def test_actual_schema_reads_plain_table_defaults():
+    actual = _on(FakeDynamoClient(live_description())).actual_schema()
+    assert actual["options"] == {
+        "billing_mode": "PAY_PER_REQUEST",
+        "table_class": "STANDARD",
+        "deletion_protection": False,
+        "point_in_time_recovery": False,
+        "ttl_attribute": None,
+        "stream_view_type": None,
+    }
+    assert actual["features"] == {
+        "local_secondary_indexes": {},
+        "sse": None,
+        "replicas": [],
+        "on_demand_throughput": None,
+    }
+    assert actual["billing_mode"] == "PAY_PER_REQUEST"
+
+
+def test_actual_schema_reads_every_option_and_feature():
+    description = live_description(
+        billing_mode="PROVISIONED",
+        TableClassSummary={"TableClass": "STANDARD_INFREQUENT_ACCESS"},
+        DeletionProtectionEnabled=True,
+        StreamSpecification={"StreamEnabled": True, "StreamViewType": "NEW_AND_OLD_IMAGES"},
+        SSEDescription={"Status": "ENABLED", "SSEType": "KMS", "KMSMasterKeyArn": "arn:key"},
+        Replicas=[{"RegionName": "eu-west-1"}, {"RegionName": "ap-south-1"}],
+        OnDemandThroughput={"MaxReadRequestUnits": -1, "MaxWriteRequestUnits": 50},
+        LocalSecondaryIndexes=[
+            {
+                "IndexName": "by-created",
+                "KeySchema": [
+                    {"AttributeName": "pk", "KeyType": "HASH"},
+                    {"AttributeName": "created", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "KEYS_ONLY"},
+            }
+        ],
+    )
+    description["AttributeDefinitions"].append({"AttributeName": "created", "AttributeType": "N"})
+    client = FakeDynamoClient(description, ttl_attribute="expiresAt", pitr=True)
+
+    actual = _on(client).actual_schema()
+
+    assert actual["options"] == {
+        "billing_mode": "PROVISIONED",
+        "table_class": "STANDARD_INFREQUENT_ACCESS",
+        "deletion_protection": True,
+        "point_in_time_recovery": True,
+        "ttl_attribute": "expiresAt",
+        "stream_view_type": "NEW_AND_OLD_IMAGES",
+    }
+    assert actual["features"] == {
+        "local_secondary_indexes": {
+            "by-created": {
+                "partition_key": "pk",
+                "sort_key": "created",
+                "projection": "KEYS_ONLY",
+                "non_key_attributes": None,
+            }
+        },
+        "sse": {"type": "KMS", "kms_key": "arn:key"},
+        "replicas": ["ap-south-1", "eu-west-1"],
+        "on_demand_throughput": {"MaxWriteRequestUnits": 50},
+    }
+    # An LSI's sort key is a key attribute, so its type is visible to the diff.
+    assert actual["attribute_types"]["created"] == "N"
+
+
+@pytest.mark.parametrize(
+    "ttl_status,expected",
+    [("ENABLED", "exp"), ("ENABLING", "exp"), ("DISABLING", None), ("DISABLED", None)],
+)
+def test_ttl_transitions_count_as_their_target_state(ttl_status, expected):
+    client = FakeDynamoClient(live_description())
+    client.describe_time_to_live = lambda TableName: {  # type: ignore[method-assign]
+        "TimeToLiveDescription": {"TimeToLiveStatus": ttl_status, "AttributeName": "exp"}
+    }
+    assert _on(client).actual_schema()["options"]["ttl_attribute"] == expected
+
+
+def test_disabled_stream_and_aws_owned_encryption_are_defaults():
+    description = live_description(
+        StreamSpecification={"StreamEnabled": False},
+        SSEDescription={"Status": "DISABLED", "SSEType": "KMS"},
+    )
+    actual = _on(FakeDynamoClient(description)).actual_schema()
+    assert actual["options"]["stream_view_type"] is None
+    assert actual["features"]["sse"] is None
+
+
+def test_schema_diff_flags_declared_option_drift():
+    class _Protected(BaseTable[_Widget]):
+        table_name = "Protected"
+        item_model = _Widget
+        table_options = TableOptions(deletion_protection=True)
+
+    client = FakeDynamoClient(
+        live_description(
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "GSI1-Category",
+                    "KeySchema": [{"AttributeName": "category", "KeyType": "HASH"}],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+        )
+    )
+    diff = _Protected(SimpleNamespace(meta=SimpleNamespace(client=client))).schema_diff()
+    assert [(f.kind, f.attribute) for f in diff.findings] == [
+        ("conflicting_table_option", "deletion_protection")
+    ]
